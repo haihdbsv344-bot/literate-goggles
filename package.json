@@ -1,1 +1,30 @@
-
+{
+  "name": "baccarat-sieucau",
+  "version": "7.0.0",
+  "description": "Baccarat Prediction - Siêu Cầu, 21 thuật toán, Không Random",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "baccarat",
+    "prediction",
+    "algorithm",
+    "ai",
+    "machine-learning",
+    "pattern-recognition"
+  ],
+  "author": "@tranhoang2286",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.2",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
