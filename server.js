@@ -20,7 +20,6 @@ const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
 const historyCorrect = {};
-const predictionHistory = {};
 
 // ============================================================
 // HÀM CHUYỂN STRING -> ARRAY
@@ -34,7 +33,6 @@ function toArray(str) {
 // ============================================================
 async function fetchTableData(tableId) {
     try {
-        // Chuẩn hóa tên bàn: C01, C02, ...
         const normalizedId = tableId.toUpperCase();
         const url = `${API_BASE}/api/baccarat/${normalizedId}`;
         console.log(`📡 Gọi API: ${url}`);
@@ -52,36 +50,78 @@ async function fetchTableData(tableId) {
 }
 
 // ============================================================
-// THUẬT TOÁN DỰ ĐOÁN - KHÔNG RANDOM
+// HÀM TÍNH TỈ LỆ TIE - ĐỘC LẬP
 // ============================================================
-function predictBCR(history) {
+function calculateTieRate(history) {
+    if (!history || history.length < 5) return { rate: 5, signal: false };
+    
+    const arr = toArray(history);
+    const tiePositions = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 'T') tiePositions.push(i);
+    }
+    
+    let rate = (tiePositions.length / arr.length) * 100;
+    let signal = false;
+    let gap = Infinity;
+    
+    // Phân tích gap
+    if (tiePositions.length > 1) {
+        let totalGap = 0;
+        for (let i = 1; i < tiePositions.length; i++) {
+            totalGap += tiePositions[i] - tiePositions[i-1];
+        }
+        gap = totalGap / (tiePositions.length - 1);
+        
+        const lastTiePos = tiePositions[tiePositions.length - 1];
+        const currentGap = arr.length - 1 - lastTiePos;
+        if (currentGap >= gap * 0.8) {
+            signal = true;
+        }
+    }
+    
+    // Nếu không có Tie trong 20 ván gần nhất
+    const recent20 = arr.slice(-20);
+    const tieInRecent = recent20.filter(c => c === 'T').length;
+    if (tieInRecent === 0 && arr.length > 20) {
+        signal = true;
+    }
+    
+    // Điều chỉnh tỉ lệ
+    let finalRate = Math.min(rate + 5, 35);
+    if (signal) {
+        finalRate = Math.min(finalRate + 10, 45);
+    }
+    if (tieInRecent >= 2) {
+        finalRate = Math.min(finalRate + 5, 30);
+    }
+    
+    return {
+        rate: Math.max(Math.round(finalRate), 3),
+        signal: signal,
+        gap: Math.round(gap)
+    };
+}
+
+// ============================================================
+// THUẬT TOÁN DỰ ĐOÁN CHÍNH (B hoặc P)
+// ============================================================
+function predictMain(history) {
     if (!history || history.length < 3) {
-        return {
-            prediction: 'Player',
-            bankerRate: 48,
-            playerRate: 48,
-            tieRate: 4,
-            pattern: 'Chưa đủ dữ liệu',
-            cau_goc: history || '',
-            confidence: 50,
-            stats: { B: 0, P: 0, T: 0 },
-            algorithms: {}
-        };
+        return { prediction: 'Player', rate: 48, pattern: 'Chưa đủ dữ liệu' };
     }
 
     const arr = toArray(history);
     const total = arr.length;
 
-    // ===== 1. TẦN SUẤT =====
     const counts = { B: 0, P: 0, T: 0 };
     for (const c of arr) {
         if (counts[c] !== undefined) counts[c]++;
     }
     const bPercent = (counts.B / total) * 100;
     const pPercent = (counts.P / total) * 100;
-    const tPercent = (counts.T / total) * 100;
 
-    // ===== 2. STREAK (DÂY) =====
+    // Streak
     let maxStreak = 1;
     let streakChar = arr[0];
     let currentStreak = 1;
@@ -97,7 +137,7 @@ function predictBCR(history) {
         }
     }
 
-    // ===== 3. ZIGZAG (ĐAN XEN) =====
+    // Zigzag
     let zigzagCount = 0;
     for (let i = 1; i < arr.length - 1; i++) {
         if (arr[i] !== arr[i-1] && arr[i] !== arr[i+1]) {
@@ -105,7 +145,7 @@ function predictBCR(history) {
         }
     }
 
-    // ===== 4. PATTERN 2-2 =====
+    // Pattern 2-2
     let pattern22 = 0;
     let pattern22Char = '';
     for (let i = 1; i < Math.min(10, arr.length - 1); i += 2) {
@@ -115,7 +155,7 @@ function predictBCR(history) {
         }
     }
 
-    // ===== 5. PATTERN 3-3 =====
+    // Pattern 3-3
     let pattern33 = 0;
     let pattern33Char = '';
     for (let i = 2; i < Math.min(12, arr.length - 1); i += 3) {
@@ -126,7 +166,7 @@ function predictBCR(history) {
         }
     }
 
-    // ===== 6. MARKOV BẬC 1 =====
+    // Markov
     const markov = { 'B': { 'B': 0, 'P': 0, 'T': 0 }, 'P': { 'B': 0, 'P': 0, 'T': 0 }, 'T': { 'B': 0, 'P': 0, 'T': 0 } };
     for (let i = 0; i < arr.length - 1; i++) {
         if (markov[arr[i]] && markov[arr[i]][arr[i+1]] !== undefined) {
@@ -151,161 +191,116 @@ function predictBCR(history) {
         }
     }
 
-    // ===== 7. MOMENTUM =====
+    // Momentum
     const values = arr.map(c => c === 'B' ? 1 : c === 'P' ? -1 : 0);
     let momentum = 0;
     for (let i = 1; i < Math.min(values.length, 10); i++) {
         momentum += values[i] - values[i - 1];
     }
 
-    // ===== 8. ENTROPY =====
-    let entropy = 0;
-    for (const c of ['B', 'P', 'T']) {
-        const prob = counts[c] / total;
-        if (prob > 0) entropy -= prob * Math.log2(prob);
-    }
-    const maxEntropy = Math.log2(3);
-    const predictability = 1 - (entropy / maxEntropy);
-
-    // ===== 9. GAP TIE =====
-    const tiePositions = [];
-    for (let i = 0; i < arr.length; i++) {
-        if (arr[i] === 'T') tiePositions.push(i);
-    }
-    let tieGap = Infinity;
-    let tieFrequency = 0;
-    let tieSignal = false;
-    let tieScore = 0;
-
-    if (tiePositions.length > 0) {
-        let totalGap = 0;
-        for (let i = 1; i < tiePositions.length; i++) {
-            totalGap += tiePositions[i] - tiePositions[i-1];
-        }
-        tieGap = tiePositions.length > 1 ? totalGap / (tiePositions.length - 1) : arr.length;
-        tieFrequency = (tiePositions.length / arr.length) * 100;
-        
-        // Phát hiện Tie sắp xuất hiện
-        const lastTiePos = tiePositions[tiePositions.length - 1];
-        const currentGap = arr.length - 1 - lastTiePos;
-        if (currentGap >= tieGap * 0.8) {
-            tieSignal = true;
-            tieScore += 40;
-        }
-    }
-    if (tieFrequency > 10) {
-        tieSignal = true;
-        tieScore += 30;
-    }
-
-    // ===== 10. PHÂN TÍCH 5 KẾT QUẢ GẦN NHẤT =====
-    const last5 = arr.slice(-5);
-    const b5 = last5.filter(c => c === 'B').length;
-    const p5 = last5.filter(c => c === 'P').length;
-    const t5 = last5.filter(c => c === 'T').length;
-
-    // ============================================================
-    // TÍNH ĐIỂM
-    // ============================================================
+    // ===== TÍNH ĐIỂM =====
     let bankerScore = 0;
     let playerScore = 0;
-    let tieScoreFinal = 0;
 
     const weights = {
-        frequency: 0.18,
-        streak: 0.20,
-        zigzag: 0.12,
+        frequency: 0.22,
+        streak: 0.25,
+        zigzag: 0.13,
         pattern22: 0.10,
         pattern33: 0.08,
-        markov: 0.10,
-        momentum: 0.08,
-        entropy: 0.04,
-        last5: 0.04,
-        tie: 0.06
+        markov: 0.12,
+        momentum: 0.10
     };
 
-    // 1. Frequency
-    const realProb = { B: 45.86, P: 44.62, T: 9.52 };
+    // Frequency
+    const realProb = { B: 45.86, P: 44.62 };
     const freqB = (bPercent * 0.5) + (realProb.B * 0.5);
     const freqP = (pPercent * 0.5) + (realProb.P * 0.5);
-    const freqT = (tPercent * 0.5) + (realProb.T * 0.5);
 
     bankerScore += freqB * weights.frequency;
     playerScore += freqP * weights.frequency;
-    tieScoreFinal += freqT * weights.frequency;
 
-    // 2. Streak
+    // Streak
     if (maxStreak >= 4) {
-        const reverse = streakChar === 'B' ? 'P' : streakChar === 'P' ? 'B' : 'T';
+        const reverse = streakChar === 'B' ? 'P' : 'B';
         if (reverse === 'B') bankerScore += 100 * weights.streak;
-        else if (reverse === 'P') playerScore += 100 * weights.streak;
-        else tieScoreFinal += 100 * weights.streak;
+        else playerScore += 100 * weights.streak;
     } else if (maxStreak >= 2) {
         if (streakChar === 'B') bankerScore += 80 * weights.streak;
         else if (streakChar === 'P') playerScore += 80 * weights.streak;
-        else tieScoreFinal += 80 * weights.streak;
+        else {
+            bankerScore += 50 * weights.streak;
+            playerScore += 50 * weights.streak;
+        }
     } else {
         bankerScore += 50 * weights.streak;
         playerScore += 50 * weights.streak;
-        tieScoreFinal += 20 * weights.streak;
     }
 
-    // 3. Zigzag
+    // Zigzag
     if (zigzagCount >= 4) {
         const last = arr[arr.length - 1];
         if (last === 'P') bankerScore += 100 * weights.zigzag;
         else if (last === 'B') playerScore += 100 * weights.zigzag;
-        else tieScoreFinal += 100 * weights.zigzag;
+        else {
+            bankerScore += 50 * weights.zigzag;
+            playerScore += 50 * weights.zigzag;
+        }
     } else if (zigzagCount >= 2) {
         const last = arr[arr.length - 1];
         if (last === 'P') bankerScore += 70 * weights.zigzag;
         else if (last === 'B') playerScore += 70 * weights.zigzag;
-        else tieScoreFinal += 70 * weights.zigzag;
+        else {
+            bankerScore += 50 * weights.zigzag;
+            playerScore += 50 * weights.zigzag;
+        }
     } else {
         bankerScore += 50 * weights.zigzag;
         playerScore += 50 * weights.zigzag;
-        tieScoreFinal += 20 * weights.zigzag;
     }
 
-    // 4. Pattern 2-2
+    // Pattern 2-2
     if (pattern22 >= 2) {
-        const reverse = pattern22Char === 'B' ? 'P' : pattern22Char === 'P' ? 'B' : 'T';
+        const reverse = pattern22Char === 'B' ? 'P' : 'B';
         if (reverse === 'B') bankerScore += 100 * weights.pattern22;
-        else if (reverse === 'P') playerScore += 100 * weights.pattern22;
-        else tieScoreFinal += 100 * weights.pattern22;
+        else playerScore += 100 * weights.pattern22;
     } else if (pattern22 >= 1) {
         const last = arr[arr.length - 1];
         if (last === 'B') bankerScore += 70 * weights.pattern22;
         else if (last === 'P') playerScore += 70 * weights.pattern22;
-        else tieScoreFinal += 70 * weights.pattern22;
+        else {
+            bankerScore += 50 * weights.pattern22;
+            playerScore += 50 * weights.pattern22;
+        }
     } else {
         bankerScore += 50 * weights.pattern22;
         playerScore += 50 * weights.pattern22;
     }
 
-    // 5. Pattern 3-3
+    // Pattern 3-3
     if (pattern33 >= 1) {
-        const reverse = pattern33Char === 'B' ? 'P' : pattern33Char === 'P' ? 'B' : 'T';
+        const reverse = pattern33Char === 'B' ? 'P' : 'B';
         if (reverse === 'B') bankerScore += 100 * weights.pattern33;
-        else if (reverse === 'P') playerScore += 100 * weights.pattern33;
-        else tieScoreFinal += 100 * weights.pattern33;
+        else playerScore += 100 * weights.pattern33;
     } else {
         bankerScore += 50 * weights.pattern33;
         playerScore += 50 * weights.pattern33;
     }
 
-    // 6. Markov
+    // Markov
     if (markovProb > 0.4) {
         if (markovPred === 'B') bankerScore += 100 * weights.markov;
         else if (markovPred === 'P') playerScore += 100 * weights.markov;
-        else tieScoreFinal += 100 * weights.markov;
+        else {
+            bankerScore += 50 * weights.markov;
+            playerScore += 50 * weights.markov;
+        }
     } else {
         bankerScore += 50 * weights.markov;
         playerScore += 50 * weights.markov;
-        tieScoreFinal += 20 * weights.markov;
     }
 
-    // 7. Momentum
+    // Momentum
     if (Math.abs(momentum) > 1.5) {
         if (momentum > 0) bankerScore += 100 * weights.momentum;
         else playerScore += 100 * weights.momentum;
@@ -314,181 +309,70 @@ function predictBCR(history) {
         playerScore += 50 * weights.momentum;
     }
 
-    // 8. Entropy
-    if (predictability > 0.6) {
-        const freqPred = bPercent > pPercent ? 'B' : 'P';
-        if (freqPred === 'B') bankerScore += 100 * weights.entropy;
-        else playerScore += 100 * weights.entropy;
-    } else if (predictability < 0.3) {
-        tieScoreFinal += 100 * weights.entropy;
-    } else {
-        bankerScore += 50 * weights.entropy;
-        playerScore += 50 * weights.entropy;
-    }
-
-    // 9. Last 5
-    if (b5 > p5 && b5 > t5) {
-        if (b5 >= 4) {
-            playerScore += 100 * weights.last5;
-        } else {
-            bankerScore += 70 * weights.last5;
-            playerScore += 30 * weights.last5;
-        }
-    } else if (p5 > b5 && p5 > t5) {
-        if (p5 >= 4) {
-            bankerScore += 100 * weights.last5;
-        } else {
-            playerScore += 70 * weights.last5;
-            bankerScore += 30 * weights.last5;
-        }
-    } else if (t5 > b5 && t5 > p5) {
-        tieScoreFinal += 100 * weights.last5;
-    } else {
-        bankerScore += 50 * weights.last5;
-        playerScore += 50 * weights.last5;
-    }
-
-    // 10. Tie Signal
-    if (tieSignal) {
-        tieScoreFinal += tieScore * weights.tie;
-        // Nếu tie score cao, ưu tiên Tie
-        if (tieScoreFinal > bankerScore && tieScoreFinal > playerScore) {
-            tieScoreFinal += 20;
-        }
-    }
-
-    // ============================================================
-    // CHUẨN HÓA
-    // ============================================================
-    const totalScore = bankerScore + playerScore + tieScoreFinal || 1;
+    // ===== CHUẨN HÓA =====
+    const totalScore = bankerScore + playerScore || 1;
     let bankerRate = (bankerScore / totalScore) * 100;
     let playerRate = (playerScore / totalScore) * 100;
-    let tieRate = (tieScoreFinal / totalScore) * 100;
 
-    // Điều chỉnh theo xác suất thực tế
+    // Điều chỉnh
     bankerRate = bankerRate * 0.7 + 13.76;
     playerRate = playerRate * 0.7 + 13.39;
-    tieRate = tieRate * 0.7 + 2.86;
 
-    const sum = bankerRate + playerRate + tieRate;
+    const sum = bankerRate + playerRate;
     bankerRate = (bankerRate / sum) * 100;
     playerRate = (playerRate / sum) * 100;
-    tieRate = (tieRate / sum) * 100;
 
-    // ============================================================
-    // XÁC ĐỊNH DỰ ĐOÁN
-    // ============================================================
+    // ===== DỰ ĐOÁN =====
     let prediction = 'Player';
-    let maxRate = Math.max(bankerRate, playerRate, tieRate);
-    
-    // Nếu Tie có tín hiệu và tỉ lệ cao, ưu tiên Tie
-    if (tieSignal && tieRate > 25 && tieRate > bankerRate && tieRate > playerRate) {
-        prediction = 'Tie';
-    } else if (maxRate === bankerRate) {
+    let rate = 0;
+    if (bankerRate > playerRate) {
         prediction = 'Banker';
-    } else if (maxRate === playerRate) {
-        prediction = 'Player';
+        rate = Math.round(bankerRate);
     } else {
-        prediction = 'Tie';
+        prediction = 'Player';
+        rate = Math.round(playerRate);
     }
 
-    // ============================================================
-    // LÀM TRÒN
-    // ============================================================
-    let b = Math.round(bankerRate);
-    let p = Math.round(playerRate);
-    let t = Math.round(tieRate);
+    // Đảm bảo tỉ lệ không = 50%
+    if (rate === 50) rate = 51;
+    if (rate > 75) rate = 74;
+    if (rate < 48) rate = 49;
 
-    if (b === 50) b = 51;
-    if (p === 50) p = 49;
-    if (t === 50) t = 6;
-
-    const totalRates = b + p + t;
-    if (totalRates !== 100) {
-        const diff = 100 - totalRates;
-        if (b > p && b > t) b += diff;
-        else if (p > b && p > t) p += diff;
-        else t += diff;
-    }
-
-    // ============================================================
-    // ĐỘ TIN CẬY
-    // ============================================================
-    let confidence = Math.round(Math.max(b, p, t));
-    if (tieSignal && t > 25) {
-        confidence = Math.min(confidence + 5, 95);
-    }
-    confidence = Math.max(55, Math.min(confidence, 95));
-
-    // ============================================================
-    // PHÂN TÍCH CẦU
-    // ============================================================
-    let patternDesc = 'Cầu đan xen';
-    if (prediction === 'Tie' && tieSignal) {
-        patternDesc = `🔮 TIE SIGNAL! Cách ${Math.round(tieGap)} ván, Tần suất ${Math.round(tieFrequency)}%`;
-    } else if (maxStreak >= 4) {
-        patternDesc = `Dây ${streakChar} x${maxStreak} - Sắp đảo chiều`;
+    // ===== PHÂN TÍCH CẦU =====
+    let pattern = 'Cầu đan xen';
+    if (maxStreak >= 4) {
+        pattern = `Dây ${streakChar} x${maxStreak} - Sắp đảo chiều`;
     } else if (zigzagCount >= 4) {
-        patternDesc = `Zigzag ${zigzagCount} lần`;
+        pattern = `Zigzag ${zigzagCount} lần`;
     } else if (pattern22 >= 2) {
-        patternDesc = `Cầu 2-2 (${pattern22} lần)`;
+        pattern = `Cầu 2-2 (${pattern22} lần)`;
     } else if (pattern33 >= 1) {
-        patternDesc = `Cầu 3-3`;
+        pattern = `Cầu 3-3`;
     } else if (bPercent > 55) {
-        patternDesc = `Banker áp đảo ${Math.round(bPercent)}%`;
+        pattern = `Banker áp đảo ${Math.round(bPercent)}%`;
     } else if (pPercent > 55) {
-        patternDesc = `Player áp đảo ${Math.round(pPercent)}%`;
-    } else if (tPercent > 10) {
-        patternDesc = `Tie xuất hiện nhiều ${Math.round(tPercent)}%`;
+        pattern = `Player áp đảo ${Math.round(pPercent)}%`;
     }
-
-    const algorithms = {
-        frequency: { B: Math.round(bPercent), P: Math.round(pPercent), T: Math.round(tPercent) },
-        streak: { char: streakChar, max: maxStreak },
-        zigzag: { count: zigzagCount },
-        pattern22: { count: pattern22 },
-        pattern33: { count: pattern33 },
-        markov: { pred: markovPred, prob: Math.round(markovProb * 100) },
-        momentum: { value: Math.round(momentum * 100) / 100 },
-        entropy: { value: Math.round(entropy * 10) / 10, predictability: Math.round(predictability * 100) },
-        tie: { signal: tieSignal, score: Math.round(tieScore), gap: Math.round(tieGap) }
-    };
 
     return {
         prediction: prediction,
-        bankerRate: Math.max(b, 3),
-        playerRate: Math.max(p, 3),
-        tieRate: Math.max(t, 2),
-        pattern: patternDesc,
-        cau_goc: history,
-        confidence: confidence,
-        tie_signal: tieSignal,
-        tie_score: Math.round(tieScore),
+        rate: rate,
+        pattern: pattern,
         stats: {
             B: Math.round(bPercent),
             P: Math.round(pPercent),
-            T: Math.round(tPercent),
             maxStreak: maxStreak,
-            zigzag: zigzagCount,
-            pattern22: pattern22,
-            pattern33: pattern33,
-            tieGap: Math.round(tieGap),
-            tieFrequency: Math.round(tieFrequency),
-            momentum: Math.round(momentum * 100) / 100,
-            entropy: Math.round(entropy * 10) / 10,
-            predictability: Math.round(predictability * 100)
-        },
-        algorithms: algorithms
+            zigzag: zigzagCount
+        }
     };
 }
 
 // ============================================================
-// API DỰ ĐOÁN TỪNG BÀN
+// API DỰ ĐOÁN TỪNG BÀN - JSON GỌN
 // ============================================================
 app.get('/api/predict/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
-        
         const cauGoc = await fetchTableData(tableId);
 
         if (!cauGoc) {
@@ -498,6 +382,7 @@ app.get('/api/predict/:tableId', async (req, res) => {
             });
         }
 
+        // Kiểm tra dữ liệu mới
         const oldData = lastData[tableId] || '';
         const isNewData = (cauGoc !== oldData && cauGoc.length > oldData.length);
         lastData[tableId] = cauGoc;
@@ -505,7 +390,11 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNewData) sessionData[tableId]++;
 
-        const result = predictBCR(cauGoc);
+        // Dự đoán chính
+        const main = predictMain(cauGoc);
+        
+        // Dự đoán Tie
+        const tie = calculateTieRate(cauGoc);
 
         // Tính đúng/sai
         let correct = 0;
@@ -513,7 +402,7 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (cauGoc.length > 1) {
             const lastActual = cauGoc[cauGoc.length - 1];
             const predMap = { 'Banker': 'B', 'Player': 'P', 'Tie': 'T' };
-            if (predMap[result.prediction] === lastActual) {
+            if (predMap[main.prediction] === lastActual) {
                 correct = 1;
                 if (!historyCorrect[tableId]) historyCorrect[tableId] = { correct: 0, wrong: 0 };
                 historyCorrect[tableId].correct++;
@@ -527,43 +416,22 @@ app.get('/api/predict/:tableId', async (req, res) => {
         const totalGames = historyCorrect[tableId] ? historyCorrect[tableId].correct + historyCorrect[tableId].wrong : 0;
         const winRate = totalGames > 0 ? Math.round((historyCorrect[tableId].correct / totalGames) * 100) : 0;
 
-        if (!predictionHistory[tableId]) predictionHistory[tableId] = [];
-        predictionHistory[tableId].push({
-            session: sessionData[tableId],
-            prediction: result.prediction,
-            bankerRate: `${result.bankerRate}%`,
-            playerRate: `${result.playerRate}%`,
-            tieRate: `${result.tieRate}%`,
-            result: correct === 1 ? 'Đúng' : 'Sai'
-        });
-
-        // ============================================================
-        // XÁC ĐỊNH LOẠI DỰ ĐOÁN ĐỂ HIỂN THỊ ĐÚNG FORMAT
-        // ============================================================
-        let responseData = {
+        // ===== JSON GỌN DỄ HIỂU =====
+        res.json({
             success: true,
             bàn: `Bàn ${tableId}`,
             phiên: sessionData[tableId],
             cầu_gốc: cauGoc,
-            dự_đoán: result.prediction,
-            Banker: `${result.bankerRate}%`,
-            Player: `${result.playerRate}%`,
-            Tie: `${result.tieRate}%`,
-            tỉ_lệ: `${Math.max(result.bankerRate, result.playerRate, result.tieRate)}%`,
+            dự_đoán: main.prediction,
+            tỉ_lệ: `${main.rate}%`,
+            dự_đoán_tie: tie.signal ? 'CÓ' : 'KHÔNG',
+            tỉ_lệ_tie: `${tie.rate}%`,
+            cầu: main.pattern,
             đúng: historyCorrect[tableId] ? historyCorrect[tableId].correct : 0,
             sai: historyCorrect[tableId] ? historyCorrect[tableId].wrong : 0,
-            tỉ_lệ_thắng_bàn: `${winRate}%`,
-            cầu: result.pattern,
-            confidence: `${result.confidence}%`,
-            tie_signal: result.tie_signal,
-            tie_score: result.tie_score,
-            stats: result.stats,
-            algorithms: result.algorithms,
-            history: predictionHistory[tableId].slice(-20),
+            tỉ_lệ_thắng: `${winRate}%`,
             id: '@tranhoang2286'
-        };
-
-        res.json(responseData);
+        });
 
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -588,14 +456,15 @@ app.get('/api/predict/all', async (req, res) => {
                 if (!sessionData[id]) sessionData[id] = 0;
                 if (isNewData) sessionData[id]++;
 
-                const result = predictBCR(cauGoc);
+                const main = predictMain(cauGoc);
+                const tie = calculateTieRate(cauGoc);
 
                 let correct = 0;
                 let wrong = 0;
                 if (cauGoc.length > 1) {
                     const lastActual = cauGoc[cauGoc.length - 1];
                     const predMap = { 'Banker': 'B', 'Player': 'P', 'Tie': 'T' };
-                    if (predMap[result.prediction] === lastActual) {
+                    if (predMap[main.prediction] === lastActual) {
                         correct = 1;
                         if (!historyCorrect[id]) historyCorrect[id] = { correct: 0, wrong: 0 };
                         historyCorrect[id].correct++;
@@ -612,17 +481,15 @@ app.get('/api/predict/all', async (req, res) => {
                 results.push({
                     bàn: `Bàn ${id}`,
                     phiên: sessionData[id],
-                    dự_đoán: result.prediction,
-                    Banker: `${result.bankerRate}%`,
-                    Player: `${result.playerRate}%`,
-                    Tie: `${result.tieRate}%`,
-                    tỉ_lệ: `${Math.max(result.bankerRate, result.playerRate, result.tieRate)}%`,
+                    cầu_gốc: cauGoc,
+                    dự_đoán: main.prediction,
+                    tỉ_lệ: `${main.rate}%`,
+                    dự_đoán_tie: tie.signal ? 'CÓ' : 'KHÔNG',
+                    tỉ_lệ_tie: `${tie.rate}%`,
+                    cầu: main.pattern,
                     đúng: historyCorrect[id] ? historyCorrect[id].correct : 0,
                     sai: historyCorrect[id] ? historyCorrect[id].wrong : 0,
-                    tỉ_lệ_thắng_bàn: `${winRate}%`,
-                    cầu: result.pattern,
-                    confidence: `${result.confidence}%`,
-                    tie_signal: result.tie_signal
+                    tỉ_lệ_thắng: `${winRate}%`
                 });
             }
         }
@@ -640,7 +507,7 @@ app.get('/api/predict/all', async (req, res) => {
 });
 
 // ============================================================
-// API PROXY - LẤY DỮ LIỆU GỐC
+// API PROXY
 // ============================================================
 app.get('/api/baccarat/:tableId', async (req, res) => {
     try {
@@ -673,22 +540,31 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
 // ============================================================
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT PREDICTION - SIÊU MẠNH V8.0',
-        version: '8.0.0',
+        name: 'BACCARAT PREDICTION - GỌN DỄ HIỂU',
+        version: '9.0.0',
         author: '@tranhoang2286',
         api_source: API_BASE,
-        features: {
-            dự_đoán: '3 cửa Banker, Player, Tie',
-            tỉ_lệ: 'Mỗi tỉ lệ riêng biệt',
-            tie_signal: 'Phát hiện Tie sắp xuất hiện',
-            không_random: '100% không random'
-        },
         endpoints: {
             'Dự đoán 1 bàn': '/api/predict/:tableId',
             'Dự đoán tất cả': '/api/predict/all',
             'Lấy dữ liệu bàn': '/api/baccarat/:tableId'
         },
-        note: 'Không phân biệt chữ hoa/thường, tự động chuyển về chữ hoa'
+        example: {
+            url: '/api/predict/C02',
+            response: {
+                bàn: 'Bàn C02',
+                phiên: 1,
+                cầu_gốc: 'BBPPBBBBPPPPPPBBBTBBPPBPPTPPBBBBPPBBPBTPBBBBPBBBBPBTBTBPPBPBPBB',
+                dự_đoán: 'Banker',
+                tỉ_lệ: '62%',
+                dự_đoán_tie: 'KHÔNG',
+                tỉ_lệ_tie: '5%',
+                cầu: 'Dây B x4 - Sắp đảo chiều',
+                đúng: 1,
+                sai: 0,
+                tỉ_lệ_thắng: '100%'
+            }
+        }
     });
 });
 
@@ -697,13 +573,11 @@ app.get('/', (req, res) => {
 // ============================================================
 app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
-    console.log('🃏 BACCARAT PREDICTION - SIÊU MẠNH V8.0');
+    console.log('🃏 BACCARAT PREDICTION - GỌN DỄ HIỂU');
     console.log('========================================');
     console.log(`🚀 Server: http://localhost:${PORT}`);
     console.log(`📡 API Source: ${API_BASE}`);
-    console.log('📌 Không phân biệt chữ hoa/thường');
-    console.log('📌 10 phương pháp phân tích');
-    console.log('📌 Dự đoán: Banker | Player | Tie');
+    console.log('📌 JSON gọn: phiên, dự_đoán, tỉ_lệ, dự_đoán_tie, tỉ_lệ_tie, cầu');
     console.log(`👤 Author: @tranhoang2286`);
     console.log('========================================');
 });
