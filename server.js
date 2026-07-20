@@ -19,7 +19,6 @@ const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 // ============================================================
 const sessionData = {};
 const lastData = {};
-const historyCorrect = {};
 
 // ============================================================
 // HÀM CHUYỂN STRING -> ARRAY
@@ -65,7 +64,6 @@ function calculateTieRate(history) {
     let signal = false;
     let gap = Infinity;
     
-    // Phân tích gap
     if (tiePositions.length > 1) {
         let totalGap = 0;
         for (let i = 1; i < tiePositions.length; i++) {
@@ -80,14 +78,12 @@ function calculateTieRate(history) {
         }
     }
     
-    // Nếu không có Tie trong 20 ván gần nhất
     const recent20 = arr.slice(-20);
     const tieInRecent = recent20.filter(c => c === 'T').length;
     if (tieInRecent === 0 && arr.length > 20) {
         signal = true;
     }
     
-    // Điều chỉnh tỉ lệ
     let finalRate = Math.min(rate + 5, 35);
     if (signal) {
         finalRate = Math.min(finalRate + 10, 45);
@@ -314,7 +310,6 @@ function predictMain(history) {
     let bankerRate = (bankerScore / totalScore) * 100;
     let playerRate = (playerScore / totalScore) * 100;
 
-    // Điều chỉnh
     bankerRate = bankerRate * 0.7 + 13.76;
     playerRate = playerRate * 0.7 + 13.39;
 
@@ -333,7 +328,6 @@ function predictMain(history) {
         rate = Math.round(playerRate);
     }
 
-    // Đảm bảo tỉ lệ không = 50%
     if (rate === 50) rate = 51;
     if (rate > 75) rate = 74;
     if (rate < 48) rate = 49;
@@ -357,18 +351,12 @@ function predictMain(history) {
     return {
         prediction: prediction,
         rate: rate,
-        pattern: pattern,
-        stats: {
-            B: Math.round(bPercent),
-            P: Math.round(pPercent),
-            maxStreak: maxStreak,
-            zigzag: zigzagCount
-        }
+        pattern: pattern
     };
 }
 
 // ============================================================
-// API DỰ ĐOÁN TỪNG BÀN - JSON GỌN
+// API DỰ ĐOÁN TỪNG BÀN - GỌN KHÔNG ĐÚNG SAI
 // ============================================================
 app.get('/api/predict/:tableId', async (req, res) => {
     try {
@@ -382,7 +370,6 @@ app.get('/api/predict/:tableId', async (req, res) => {
             });
         }
 
-        // Kiểm tra dữ liệu mới
         const oldData = lastData[tableId] || '';
         const isNewData = (cauGoc !== oldData && cauGoc.length > oldData.length);
         lastData[tableId] = cauGoc;
@@ -390,33 +377,10 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNewData) sessionData[tableId]++;
 
-        // Dự đoán chính
         const main = predictMain(cauGoc);
-        
-        // Dự đoán Tie
         const tie = calculateTieRate(cauGoc);
 
-        // Tính đúng/sai
-        let correct = 0;
-        let wrong = 0;
-        if (cauGoc.length > 1) {
-            const lastActual = cauGoc[cauGoc.length - 1];
-            const predMap = { 'Banker': 'B', 'Player': 'P', 'Tie': 'T' };
-            if (predMap[main.prediction] === lastActual) {
-                correct = 1;
-                if (!historyCorrect[tableId]) historyCorrect[tableId] = { correct: 0, wrong: 0 };
-                historyCorrect[tableId].correct++;
-            } else {
-                wrong = 1;
-                if (!historyCorrect[tableId]) historyCorrect[tableId] = { correct: 0, wrong: 0 };
-                historyCorrect[tableId].wrong++;
-            }
-        }
-
-        const totalGames = historyCorrect[tableId] ? historyCorrect[tableId].correct + historyCorrect[tableId].wrong : 0;
-        const winRate = totalGames > 0 ? Math.round((historyCorrect[tableId].correct / totalGames) * 100) : 0;
-
-        // ===== JSON GỌN DỄ HIỂU =====
+        // ===== JSON GỌN - KHÔNG ĐÚNG SAI =====
         res.json({
             success: true,
             bàn: `Bàn ${tableId}`,
@@ -427,9 +391,6 @@ app.get('/api/predict/:tableId', async (req, res) => {
             dự_đoán_tie: tie.signal ? 'CÓ' : 'KHÔNG',
             tỉ_lệ_tie: `${tie.rate}%`,
             cầu: main.pattern,
-            đúng: historyCorrect[tableId] ? historyCorrect[tableId].correct : 0,
-            sai: historyCorrect[tableId] ? historyCorrect[tableId].wrong : 0,
-            tỉ_lệ_thắng: `${winRate}%`,
             id: '@tranhoang2286'
         });
 
@@ -459,25 +420,6 @@ app.get('/api/predict/all', async (req, res) => {
                 const main = predictMain(cauGoc);
                 const tie = calculateTieRate(cauGoc);
 
-                let correct = 0;
-                let wrong = 0;
-                if (cauGoc.length > 1) {
-                    const lastActual = cauGoc[cauGoc.length - 1];
-                    const predMap = { 'Banker': 'B', 'Player': 'P', 'Tie': 'T' };
-                    if (predMap[main.prediction] === lastActual) {
-                        correct = 1;
-                        if (!historyCorrect[id]) historyCorrect[id] = { correct: 0, wrong: 0 };
-                        historyCorrect[id].correct++;
-                    } else {
-                        wrong = 1;
-                        if (!historyCorrect[id]) historyCorrect[id] = { correct: 0, wrong: 0 };
-                        historyCorrect[id].wrong++;
-                    }
-                }
-
-                const totalGames = historyCorrect[id] ? historyCorrect[id].correct + historyCorrect[id].wrong : 0;
-                const winRate = totalGames > 0 ? Math.round((historyCorrect[id].correct / totalGames) * 100) : 0;
-
                 results.push({
                     bàn: `Bàn ${id}`,
                     phiên: sessionData[id],
@@ -486,10 +428,7 @@ app.get('/api/predict/all', async (req, res) => {
                     tỉ_lệ: `${main.rate}%`,
                     dự_đoán_tie: tie.signal ? 'CÓ' : 'KHÔNG',
                     tỉ_lệ_tie: `${tie.rate}%`,
-                    cầu: main.pattern,
-                    đúng: historyCorrect[id] ? historyCorrect[id].correct : 0,
-                    sai: historyCorrect[id] ? historyCorrect[id].wrong : 0,
-                    tỉ_lệ_thắng: `${winRate}%`
+                    cầu: main.pattern
                 });
             }
         }
@@ -540,8 +479,8 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
 // ============================================================
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT PREDICTION - GỌN DỄ HIỂU',
-        version: '9.0.0',
+        name: 'BACCARAT PREDICTION - GỌN NHẤT',
+        version: '10.0.0',
         author: '@tranhoang2286',
         api_source: API_BASE,
         endpoints: {
@@ -559,10 +498,7 @@ app.get('/', (req, res) => {
                 tỉ_lệ: '62%',
                 dự_đoán_tie: 'KHÔNG',
                 tỉ_lệ_tie: '5%',
-                cầu: 'Dây B x4 - Sắp đảo chiều',
-                đúng: 1,
-                sai: 0,
-                tỉ_lệ_thắng: '100%'
+                cầu: 'Dây B x4 - Sắp đảo chiều'
             }
         }
     });
@@ -573,11 +509,12 @@ app.get('/', (req, res) => {
 // ============================================================
 app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
-    console.log('🃏 BACCARAT PREDICTION - GỌN DỄ HIỂU');
+    console.log('🃏 BACCARAT PREDICTION - GỌN NHẤT');
     console.log('========================================');
     console.log(`🚀 Server: http://localhost:${PORT}`);
     console.log(`📡 API Source: ${API_BASE}`);
-    console.log('📌 JSON gọn: phiên, dự_đoán, tỉ_lệ, dự_đoán_tie, tỉ_lệ_tie, cầu');
+    console.log('📌 JSON: bàn, phiên, cầu_gốc, dự_đoán, tỉ_lệ, dự_đoán_tie, tỉ_lệ_tie, cầu');
+    console.log('📌 Đã xóa đúng/sai');
     console.log(`👤 Author: @tranhoang2286`);
     console.log('========================================');
 });
