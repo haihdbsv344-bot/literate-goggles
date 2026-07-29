@@ -12,11 +12,8 @@ app.use((req, res, next) => {
 const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
-const predictionHistory = {}; // NEW: track prediction accuracy per table
+const predictionHistory = {};
 
-// ============================================================
-// HELPERS
-// ============================================================
 function toArray(str) {
     return str ? str.split('').filter(c => ['B','P','T'].includes(c)) : [];
 }
@@ -26,15 +23,15 @@ function clamp(v, lo, hi) {
 }
 
 // ============================================================
-// METHOD 1: FREQUENCY (BAYESIAN-ADJUSTED)
+// 16 METHODS (giữ nguyên logic, chỉ fix scoring)
 // ============================================================
+
 function analyzeFrequency(arr) {
     const prior = { B: 45.86, P: 44.62, T: 9.52 };
     const counts = { B: 0, P: 0, T: 0 };
-    for (const c of arr) counts[c]++;
+    for (const c of arr) if (counts[c] !== undefined) counts[c]++;
     const total = arr.length;
-    const alpha = 20; // prior strength
-
+    const alpha = 20;
     const post = {};
     for (const k of ['B','P','T']) {
         post[k] = (counts[k] + (prior[k] / 100) * alpha) / (total + alpha) * 100;
@@ -42,364 +39,217 @@ function analyzeFrequency(arr) {
     return { post, counts, pct: { B: (counts.B/total)*100, P: (counts.P/total)*100, T: (counts.T/total)*100 } };
 }
 
-// ============================================================
-// METHOD 2: STREAK ANALYSIS (ENHANCED)
-// ============================================================
 function analyzeStreak(arr) {
-    let streaks = [];
+    const streaks = [];
     let cur = { char: arr[0], len: 1 };
     for (let i = 1; i < arr.length; i++) {
-        if (arr[i] === cur.char) {
-            cur.len++;
-        } else {
-            streaks.push({ ...cur });
-            cur = { char: arr[i], len: 1 };
-        }
+        if (arr[i] === cur.char) cur.len++;
+        else { streaks.push({...cur}); cur = { char: arr[i], len: 1 }; }
     }
-    streaks.push({ ...cur });
-
+    streaks.push({...cur});
     const last = streaks[streaks.length - 1];
     const secondLast = streaks[streaks.length - 2] || null;
-
-    // Average streak length per side
-    const avgB = streaks.filter(s => s.char === 'B').reduce((a,s) => a + s.len, 0) /
-                 (streaks.filter(s => s.char === 'B').length || 1);
-    const avgP = streaks.filter(s => s.char === 'P').reduce((a,s) => a + s.len, 0) /
-                 (streaks.filter(s => s.char === 'P').length || 1);
-
+    const avgB = streaks.filter(s=>s.char==='B').reduce((a,s)=>a+s.len,0) / (streaks.filter(s=>s.char==='B').length||1);
+    const avgP = streaks.filter(s=>s.char==='P').reduce((a,s)=>a+s.len,0) / (streaks.filter(s=>s.char==='P').length||1);
     return { last, secondLast, streaks, avgB, avgP };
 }
 
-// ============================================================
-// METHOD 3: ZIGZAG DETECTION (WINDOWED)
-// ============================================================
 function analyzeZigzag(arr) {
-    const window10 = arr.slice(-10);
-    const windowFull = arr;
-    
     function countZZ(a) {
         let zz = 0;
         for (let i = 1; i < a.length - 1; i++) {
-            if (a[i] !== 'T' && a[i-1] !== 'T' && a[i+1] !== 'T') {
-                if (a[i] !== a[i-1] && a[i] !== a[i+1]) zz++;
-            }
+            if (a[i]!=='T' && a[i-1]!=='T' && a[i+1]!=='T' && a[i]!==a[i-1] && a[i]!==a[i+1]) zz++;
         }
         return zz;
     }
-
-    return {
-        zz10: countZZ(window10),
-        zzFull: countZZ(windowFull),
-        isZZ: countZZ(window10) >= 3
-    };
+    const window10 = arr.slice(-10);
+    return { zz10: countZZ(window10), zzFull: countZZ(arr), isZZ: countZZ(window10) >= 3 };
 }
 
-// ============================================================
-// METHOD 4: PATTERN RECOGNITION (2-2, 3-3, 1-2-1, 2-1-2)
-// ============================================================
 function analyzePatterns(arr) {
-    // NEW: encode streaks into run-length
     const runs = [];
     let cur = { char: arr[0], len: 1 };
     for (let i = 1; i < arr.length; i++) {
         if (arr[i] === cur.char) cur.len++;
-        else { runs.push({ ...cur }); cur = { char: arr[i], len: 1 }; }
+        else { runs.push({...cur}); cur = { char: arr[i], len: 1 }; }
     }
-    runs.push({ ...cur });
-
-    const last4runs = runs.slice(-4).map(r => r.len);
-    const last4chars = runs.slice(-4).map(r => r.char);
-
-    // Pattern 2-2: BBPP or PPBB
-    const is22 = last4runs.length >= 2 &&
-                 last4runs[last4runs.length-1] === 2 &&
-                 last4runs[last4runs.length-2] === 2 &&
-                 last4chars[last4chars.length-1] !== last4chars[last4chars.length-2];
-
-    // Pattern 3-3
-    const is33 = last4runs.length >= 2 &&
-                 last4runs[last4runs.length-1] === 3 &&
-                 last4runs[last4runs.length-2] === 3;
-
-    // Pattern 1-2-1
-    const is121 = last4runs.length >= 3 &&
-                  last4runs[last4runs.length-3] === 1 &&
-                  last4runs[last4runs.length-2] === 2 &&
-                  last4runs[last4runs.length-1] === 1;
-
-    // Pattern 2-1-2
-    const is212 = last4runs.length >= 3 &&
-                  last4runs[last4runs.length-3] === 2 &&
-                  last4runs[last4runs.length-2] === 1 &&
-                  last4runs[last4runs.length-1] === 2;
-
-    const lastRun = runs[runs.length - 1];
-    const prevRun = runs[runs.length - 2] || null;
-
-    return { is22, is33, is121, is212, runs, lastRun, prevRun };
+    runs.push({...cur});
+    const rLen = runs.map(r=>r.len);
+    const rChar = runs.map(r=>r.char);
+    const n = rLen.length;
+    const is22 = n>=2 && rLen[n-1]===2 && rLen[n-2]===2 && rChar[n-1]!==rChar[n-2];
+    const is33 = n>=2 && rLen[n-1]===3 && rLen[n-2]===3;
+    const is121 = n>=3 && rLen[n-3]===1 && rLen[n-2]===2 && rLen[n-1]===1;
+    const is212 = n>=3 && rLen[n-3]===2 && rLen[n-2]===1 && rLen[n-1]===2;
+    return { is22, is33, is121, is212, runs, lastRun: runs[n-1], prevRun: runs[n-2]||null };
 }
 
-// ============================================================
-// METHOD 5: MARKOV CHAIN (ORDER 1 + ORDER 2)
-// ============================================================
 function analyzeMarkov(arr) {
-    // Order-1
     const m1 = { B:{B:0,P:0,T:0}, P:{B:0,P:0,T:0}, T:{B:0,P:0,T:0} };
-    for (let i = 0; i < arr.length - 1; i++) {
+    for (let i = 0; i < arr.length-1; i++) {
         if (m1[arr[i]]) m1[arr[i]][arr[i+1]]++;
     }
-
-    // Order-2
     const m2 = {};
-    for (let i = 0; i < arr.length - 2; i++) {
-        const key = arr[i] + arr[i+1];
-        if (!m2[key]) m2[key] = { B:0, P:0, T:0 };
+    for (let i = 0; i < arr.length-2; i++) {
+        const key = arr[i]+arr[i+1];
+        if (!m2[key]) m2[key] = {B:0,P:0,T:0};
         m2[key][arr[i+2]]++;
     }
-
-    const last1 = arr[arr.length - 1];
-    const last2 = arr.slice(-2).join('');
-
     function bestOf(trans) {
-        const total = Object.values(trans).reduce((a,b) => a+b, 0);
-        if (!total) return { pred: 'B', prob: 0 };
-        let best = 'B', bestP = 0;
+        const total = Object.values(trans).reduce((a,b)=>a+b,0);
+        if (!total) return { pred:'B', prob:0 };
+        let best='B', bestP=0;
         for (const [k,v] of Object.entries(trans)) {
-            if (v/total > bestP) { bestP = v/total; best = k; }
+            if (v/total > bestP) { bestP=v/total; best=k; }
         }
-        return { pred: best, prob: bestP };
+        return { pred:best, prob:bestP };
     }
-
-    const o1 = bestOf(m1[last1] || {B:1,P:1,T:0});
-    const o2 = m2[last2] ? bestOf(m2[last2]) : { pred: 'B', prob: 0 };
-
-    // Weighted: order2 more reliable when enough data
+    const last1 = arr[arr.length-1];
+    const last2 = arr.slice(-2).join('');
+    const o1 = bestOf(m1[last1]||{B:1,P:1,T:0});
+    const o2 = m2[last2] ? bestOf(m2[last2]) : {pred:'B',prob:0};
     const pred = (arr.length > 30 && o2.prob > 0.35) ? o2 : o1;
     return { o1, o2, pred };
 }
 
-// ============================================================
-// METHOD 6: MOMENTUM (EWM - EXPONENTIAL WEIGHTED)
-// ============================================================
 function analyzeMomentum(arr) {
-    const values = arr.map(c => c === 'B' ? 1 : c === 'P' ? -1 : 0);
+    const values = arr.map(c => c==='B'?1 : c==='P'?-1 : 0);
     const alpha = 0.3;
-    let ewm = values[0] || 0;
-    for (let i = 1; i < values.length; i++) {
-        ewm = alpha * values[i] + (1 - alpha) * ewm;
-    }
-    // ewm > 0 → Banker momentum, < 0 → Player momentum
-    return { ewm, trend: ewm > 0.15 ? 'B' : ewm < -0.15 ? 'P' : 'NEUTRAL' };
+    let ewm = values[0]||0;
+    for (let i=1; i<values.length; i++) ewm = alpha*values[i] + (1-alpha)*ewm;
+    return { ewm, trend: ewm>0.15?'B' : ewm<-0.15?'P' : 'NEUTRAL' };
 }
 
-// ============================================================
-// METHOD 7: ENTROPY + PREDICTABILITY
-// ============================================================
 function analyzeEntropy(arr) {
-    const counts = { B: 0, P: 0, T: 0 };
-    for (const c of arr) counts[c]++;
+    const counts = {B:0,P:0,T:0};
+    for (const c of arr) if (counts[c]!==undefined) counts[c]++;
     const total = arr.length;
     let entropy = 0;
     for (const c of ['B','P','T']) {
-        const p = counts[c] / total;
-        if (p > 0) entropy -= p * Math.log2(p);
+        const p = counts[c]/total;
+        if (p>0) entropy -= p*Math.log2(p);
     }
-    const maxH = Math.log2(3);
-    return { entropy, predictability: 1 - (entropy / maxH) };
+    return { entropy, predictability: 1 - (entropy/Math.log2(3)) };
 }
 
-// ============================================================
-// METHOD 8: LAST N WINDOW BIAS
-// ============================================================
 function analyzeWindows(arr) {
-    function countWindow(n) {
+    function cw(n) {
         const w = arr.slice(-n);
-        return {
-            B: w.filter(c => c==='B').length,
-            P: w.filter(c => c==='P').length,
-            T: w.filter(c => c==='T').length,
-            len: w.length
-        };
+        return { B:w.filter(c=>c==='B').length, P:w.filter(c=>c==='P').length, T:w.filter(c=>c==='T').length, len:w.length };
     }
-    return { w5: countWindow(5), w10: countWindow(10), w20: countWindow(20) };
+    return { w5:cw(5), w10:cw(10), w20:cw(20) };
 }
 
-// ============================================================
-// METHOD 9: TIE SIGNAL (ENHANCED CYCLE DETECTION)
-// ============================================================
 function analyzeTie(arr) {
-    const tiePos = arr.reduce((acc, c, i) => { if (c==='T') acc.push(i); return acc; }, []);
-    if (tiePos.length < 2) return { signal: false, freq: (tiePos.length/arr.length)*100, avgGap: Infinity, gapScore: 0 };
-
+    const tiePos = arr.reduce((acc,c,i)=>{ if(c==='T') acc.push(i); return acc; },[]);
+    if (tiePos.length < 2) return { signal:false, freq:(tiePos.length/arr.length)*100, avgGap:Infinity, gapScore:0, lastGap:0 };
     const gaps = [];
-    for (let i = 1; i < tiePos.length; i++) gaps.push(tiePos[i] - tiePos[i-1]);
-    const avgGap = gaps.reduce((a,b)=>a+b,0) / gaps.length;
-    const lastGap = arr.length - 1 - tiePos[tiePos.length-1];
-    const freq = (tiePos.length / arr.length) * 100;
-
-    // Gap score: how overdue is a tie?
-    const gapScore = clamp(lastGap / avgGap, 0, 3);
-    const signal = (gapScore >= 0.85 && freq > 7) || freq > 13;
-
+    for (let i=1; i<tiePos.length; i++) gaps.push(tiePos[i]-tiePos[i-1]);
+    const avgGap = gaps.reduce((a,b)=>a+b,0)/gaps.length;
+    const lastGap = arr.length-1-tiePos[tiePos.length-1];
+    const freq = (tiePos.length/arr.length)*100;
+    const gapScore = clamp(lastGap/avgGap, 0, 3);
+    const signal = (gapScore>=0.85 && freq>7) || freq>13;
     return { signal, freq, avgGap, lastGap, gapScore };
 }
 
-// ============================================================
-// METHOD 10: MEAN REVERSION
-// ============================================================
 function analyzeMeanReversion(arr) {
     const freq = analyzeFrequency(arr);
     const pct = freq.pct;
-    // If B% >> theoretical 45.86 → mean revert to P
-    const bDeviation = pct.B - 45.86;
-    const pDeviation = pct.P - 44.62;
-
-    return {
-        bDeviation,
-        pDeviation,
-        revertTo: bDeviation > 8 ? 'P' : pDeviation > 8 ? 'B' : 'NEUTRAL',
-        strength: Math.max(Math.abs(bDeviation), Math.abs(pDeviation))
-    };
+    const bDev = pct.B - 45.86;
+    const pDev = pct.P - 44.62;
+    return { bDev, pDev, revertTo: bDev>8?'P' : pDev>8?'B' : 'NEUTRAL', strength: Math.max(Math.abs(bDev), Math.abs(pDev)) };
 }
 
-// ============================================================
-// METHOD 11: CHOP vs STREAK REGIME
-// ============================================================
 function analyzeRegime(arr) {
     const recent = arr.slice(-20);
     let switches = 0;
-    for (let i = 1; i < recent.length; i++) {
-        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
-            switches++;
-        }
+    for (let i=1; i<recent.length; i++) {
+        if (recent[i]!==recent[i-1] && recent[i]!=='T' && recent[i-1]!=='T') switches++;
     }
-    const switchRate = switches / (recent.length - 1);
-    // > 0.6 → chop regime (zigzag dominant)
-    // < 0.35 → streak regime
-    return {
-        switchRate,
-        regime: switchRate > 0.6 ? 'CHOP' : switchRate < 0.35 ? 'STREAK' : 'MIXED'
-    };
+    const switchRate = switches/(recent.length-1||1);
+    return { switchRate, regime: switchRate>0.6?'CHOP' : switchRate<0.35?'STREAK' : 'MIXED' };
 }
 
-// ============================================================
-// METHOD 12: AUTOCORRELATION LAG-1
-// ============================================================
 function analyzeAutoCorr(arr) {
-    const vals = arr.map(c => c==='B' ? 1 : c==='P' ? -1 : 0);
-    const mean = vals.reduce((a,b)=>a+b,0) / vals.length;
-    let num = 0, den = 0;
-    for (let i = 0; i < vals.length - 1; i++) {
-        num += (vals[i] - mean) * (vals[i+1] - mean);
-    }
-    for (let i = 0; i < vals.length; i++) {
-        den += (vals[i] - mean) ** 2;
-    }
-    const acf = den === 0 ? 0 : num / den;
-    // acf > 0 → trending, acf < 0 → reverting
-    return { acf, type: acf > 0.1 ? 'TREND' : acf < -0.1 ? 'REVERT' : 'RANDOM' };
+    const vals = arr.map(c=>c==='B'?1:c==='P'?-1:0);
+    const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
+    let num=0, den=0;
+    for (let i=0; i<vals.length-1; i++) num += (vals[i]-mean)*(vals[i+1]-mean);
+    for (let i=0; i<vals.length; i++) den += (vals[i]-mean)**2;
+    const acf = den===0?0:num/den;
+    return { acf, type: acf>0.1?'TREND' : acf<-0.1?'REVERT' : 'RANDOM' };
 }
 
-// ============================================================
-// METHOD 13: SESSION FATIGUE (SCORE DRIFT CORRECTION)
-// ============================================================
-function analyzeSessionFatigue(tableId, currentPred) {
+function analyzeSessionFatigue(tableId) {
     if (!predictionHistory[tableId]) predictionHistory[tableId] = [];
     const hist = predictionHistory[tableId];
-    if (hist.length < 5) return { fatigueBoost: { B: 0, P: 0, T: 0 } };
-
-    const recent5 = hist.slice(-5);
-    const bCount = recent5.filter(p => p === 'B').length;
-    const pCount = recent5.filter(p => p === 'P').length;
-
-    // If we've been calling B 4+ times in a row, add slight P boost
-    const boost = { B: 0, P: 0, T: 0 };
-    if (bCount >= 4) boost.P += 8;
-    else if (pCount >= 4) boost.B += 8;
-
-    return { fatigueBoost: boost };
+    if (hist.length < 5) return { boost: {B:0,P:0,T:0} };
+    const r = hist.slice(-5);
+    const bC = r.filter(p=>p==='B').length;
+    const pC = r.filter(p=>p==='P').length;
+    const boost = {B:0,P:0,T:0};
+    if (bC>=4) boost.P += 6;
+    else if (pC>=4) boost.B += 6;
+    return { boost };
 }
 
-// ============================================================
-// METHOD 14: HOT/COLD ANALYSIS
-// ============================================================
 function analyzeHotCold(arr) {
     const recent = arr.slice(-15);
-    const full = arr;
-    const rcB = recent.filter(c=>c==='B').length / recent.length;
-    const fullB = full.filter(c=>c==='B').length / full.length;
-    const rcP = recent.filter(c=>c==='P').length / recent.length;
-    const fullP = full.filter(c=>c==='P').length / full.length;
-
-    // Hot: recent rate significantly above historical
+    const rcB = recent.filter(c=>c==='B').length/recent.length;
+    const fullB = arr.filter(c=>c==='B').length/arr.length;
+    const rcP = recent.filter(c=>c==='P').length/recent.length;
+    const fullP = arr.filter(c=>c==='P').length/arr.length;
     const bHot = rcB - fullB;
     const pHot = rcP - fullP;
-
-    return {
-        bHot, pHot,
-        hotSide: bHot > 0.12 ? 'B' : pHot > 0.12 ? 'P' : 'NEUTRAL',
-        // Hot side often cools → predict opposite
-        coolDown: bHot > 0.15 ? 'P' : pHot > 0.15 ? 'B' : 'NEUTRAL'
-    };
+    return { bHot, pHot, coolDown: bHot>0.15?'P' : pHot>0.15?'B' : 'NEUTRAL' };
 }
 
-// ============================================================
-// METHOD 15: PATTERN COMPLETION
-// ============================================================
 function analyzePatternCompletion(arr) {
-    // Look for partial repeat of recent 6-card sequence
-    if (arr.length < 12) return { match: false, predicted: null };
-    
+    if (arr.length < 12) return { match:false, predicted:null, confidence:0 };
     const recent6 = arr.slice(-6).join('');
-    const searchIn = arr.slice(0, -6).join('');
-    
-    for (let partial = 5; partial >= 3; partial--) {
+    const searchIn = arr.slice(0,-6).join('');
+    for (let partial=5; partial>=3; partial--) {
         const partialSeq = recent6.substring(0, partial);
         const idx = searchIn.lastIndexOf(partialSeq);
-        if (idx !== -1 && idx + partial < arr.length - 6) {
-            const nextChar = arr[idx + partial];
-            return { match: true, predicted: nextChar, confidence: partial / 6 };
+        if (idx !== -1 && idx+partial < arr.length-6) {
+            return { match:true, predicted:arr[idx+partial], confidence:partial/6 };
         }
     }
-    return { match: false, predicted: null, confidence: 0 };
+    return { match:false, predicted:null, confidence:0 };
 }
 
-// ============================================================
-// METHOD 16: VOLATILITY INDEX
-// ============================================================
 function analyzeVolatility(arr) {
     const window = arr.slice(-20);
     let changes = 0;
-    for (let i = 1; i < window.length; i++) {
-        if (window[i] !== window[i-1]) changes++;
+    for (let i=1; i<window.length; i++) {
+        if (window[i]!==window[i-1]) changes++;
     }
-    const vol = changes / (window.length - 1);
-    // High volatility → patterns less reliable → fall back to frequency
-    return { vol, isHigh: vol > 0.65, isLow: vol < 0.35 };
+    const vol = changes/(window.length-1||1);
+    return { vol, isHigh:vol>0.65, isLow:vol<0.35 };
 }
 
 // ============================================================
-// MASTER ENSEMBLE PREDICTOR
+// ENSEMBLE PREDICTOR — FIXED SCORING
 // ============================================================
-function predictBCR(history, tableId = 'UNKNOWN') {
+function predictBCR(history, tableId='UNKNOWN') {
     if (!history || history.length < 3) {
         return {
-            prediction: 'Player', bankerRate: 46, playerRate: 46, tieRate: 8,
-            pattern: 'Chưa đủ dữ liệu', cau_goc: history || '',
-            confidence: 50, stats: { B: 0, P: 0, T: 0 }
+            prediction:'Player', bankerRate:46, playerRate:46, tieRate:8,
+            pattern:'Chưa đủ dữ liệu', cau_goc:history||'',
+            confidence:50, stats:{B:0,P:0,T:0}
         };
     }
 
     const arr = toArray(history);
     if (arr.length < 3) {
         return {
-            prediction: 'Player', bankerRate: 46, playerRate: 46, tieRate: 8,
-            pattern: 'Chưa đủ dữ liệu', cau_goc: history || '',
-            confidence: 50, stats: { B: 0, P: 0, T: 0 }
+            prediction:'Player', bankerRate:46, playerRate:46, tieRate:8,
+            pattern:'Chưa đủ dữ liệu', cau_goc:history||'',
+            confidence:50, stats:{B:0,P:0,T:0}
         };
     }
 
-    // ── Run all methods ──
     const freq    = analyzeFrequency(arr);
     const streak  = analyzeStreak(arr);
     const zigzag  = analyzeZigzag(arr);
@@ -412,211 +262,252 @@ function predictBCR(history, tableId = 'UNKNOWN') {
     const mrev    = analyzeMeanReversion(arr);
     const regime  = analyzeRegime(arr);
     const acf     = analyzeAutoCorr(arr);
-    const fatigue = analyzeSessionFatigue(tableId, null);
+    const fatigue = analyzeSessionFatigue(tableId);
     const hotcold = analyzeHotCold(arr);
     const patcomp = analyzePatternCompletion(arr);
     const vol     = analyzeVolatility(arr);
 
     // ── Score accumulator ──
-    let bScore = 0, pScore = 0, tScore = 0;
+    // Format: setiap method ngủ contribute vote {B, P, T} dalam range 0–1
+    // Tao accumulate votes, lấy weighted average, KHÔNG clamp keras
+    const votes = [];
 
-    // Weight map (total should sum roughly to 1600 baseline)
-    // Each method contributes to a 0–100 mini-score weighted by importance
+    // FIX UTAMA: mỗi method đóng góp vote {b, p, t} + weight
+    // vote phải sum = 1 per method
+    // weight = importance của method
 
-    // 1. FREQUENCY (Bayesian) — weight 80
-    const fW = 80;
-    bScore += (freq.post.B / 100) * fW;
-    pScore += (freq.post.P / 100) * fW;
-    tScore += (freq.post.T / 100) * fW;
+    const lastNT = [...arr].reverse().find(c=>c!=='T') || 'B';
 
-    // 2. STREAK — weight 160
-    const sW = 160;
-    const sLast = streak.last;
-    if (sLast.char !== 'T') {
-        // Breakeven at streak len 3: below → continue, above → reverse
-        const continueProbability = Math.max(0, 1 - (sLast.len - 1) * 0.25);
-        const reverseProbability  = 1 - continueProbability;
-        const cont = sLast.char;
-        const rev  = cont === 'B' ? 'P' : 'B';
-        if (cont === 'B') { bScore += continueProbability * sW; pScore += reverseProbability * sW; }
-        else               { pScore += continueProbability * sW; bScore += reverseProbability * sW; }
-    } else {
-        bScore += 0.46 * sW; pScore += 0.44 * sW; tScore += 0.10 * sW;
+    // 1. BAYESIAN FREQUENCY — weight 1.0
+    {
+        const tot = freq.post.B + freq.post.P + freq.post.T;
+        votes.push({ b:freq.post.B/tot, p:freq.post.P/tot, t:freq.post.T/tot, w:1.0 });
     }
 
-    // 3. ZIGZAG — weight 120
-    const zzW = 120;
-    if (zigzag.isZZ) {
-        const lastNonT = [...arr].reverse().find(c => c !== 'T');
-        if (lastNonT === 'B') { pScore += 0.75 * zzW; bScore += 0.25 * zzW; }
-        else if (lastNonT === 'P') { bScore += 0.75 * zzW; pScore += 0.25 * zzW; }
-        else { bScore += 0.5 * zzW; pScore += 0.5 * zzW; }
-    } else {
-        bScore += 0.5 * zzW; pScore += 0.5 * zzW;
+    // 2. STREAK — weight 1.8
+    {
+        const sl = streak.last;
+        let b=0.46, p=0.44, t=0.10;
+        if (sl.char !== 'T') {
+            // Probability of continuing decreases with streak length
+            // Based on empirical baccarat: ~50% chance of continuation at len 1
+            // drops ~5% per additional card
+            const continueP = clamp(0.52 - (sl.len-1)*0.06, 0.25, 0.65);
+            const reverseP = 1 - continueP;
+            if (sl.char==='B') { b=continueP; p=reverseP; t=0.02; }
+            else               { p=continueP; b=reverseP; t=0.02; }
+            // normalize
+            const s = b+p+t; b/=s; p/=s; t/=s;
+        }
+        votes.push({ b, p, t, w:1.8 });
     }
 
-    // 4. PATTERNS — weight 140
-    const ptW = 140;
-    const pLastChar = patt.lastRun?.char;
-    const pPrevChar = patt.prevRun?.char;
-    if (patt.is22) {
-        // 2-2 pattern → continue current in 2-2 cadence: next is a pair of the previous
-        const nextIn22 = pPrevChar === 'B' ? 'B' : 'P';
-        if (nextIn22 === 'B') { bScore += 0.78 * ptW; pScore += 0.22 * ptW; }
-        else { pScore += 0.78 * ptW; bScore += 0.22 * ptW; }
-    } else if (patt.is33) {
-        const nextIn33 = pLastChar === 'B' ? 'P' : 'B';
-        if (nextIn33 === 'B') { bScore += 0.78 * ptW; pScore += 0.22 * ptW; }
-        else { pScore += 0.78 * ptW; bScore += 0.22 * ptW; }
-    } else if (patt.is121) {
-        // 1-2-1 → next is likely a pair
-        if (pLastChar === 'B') { bScore += 0.65 * ptW; pScore += 0.35 * ptW; }
-        else { pScore += 0.65 * ptW; bScore += 0.35 * ptW; }
-    } else if (patt.is212) {
-        if (pLastChar === 'B') { bScore += 0.62 * ptW; pScore += 0.38 * ptW; }
-        else { pScore += 0.62 * ptW; bScore += 0.38 * ptW; }
-    } else {
-        bScore += 0.5 * ptW; pScore += 0.5 * ptW;
+    // 3. ZIGZAG — weight 1.4
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (zigzag.isZZ) {
+            // Chop → flip
+            if (lastNT==='B') { b=0.25; p=0.70; t=0.05; }
+            else              { b=0.70; p=0.25; t=0.05; }
+        }
+        votes.push({ b, p, t, w:1.4 });
     }
 
-    // 5. MARKOV — weight 150
-    const mkW = 150;
-    const mkP = markov.pred;
-    if (mkP.pred === 'B') { bScore += mkP.prob * mkW; pScore += (1 - mkP.prob) * 0.9 * mkW; tScore += 0.02 * mkW; }
-    else if (mkP.pred === 'P') { pScore += mkP.prob * mkW; bScore += (1 - mkP.prob) * 0.9 * mkW; tScore += 0.02 * mkW; }
-    else { tScore += mkP.prob * mkW; bScore += 0.46 * (1 - mkP.prob) * mkW; pScore += 0.44 * (1 - mkP.prob) * mkW; }
-
-    // 6. MOMENTUM (EWM) — weight 100
-    const moW = 100;
-    if (mom.trend === 'B') { bScore += 0.70 * moW; pScore += 0.30 * moW; }
-    else if (mom.trend === 'P') { pScore += 0.70 * moW; bScore += 0.30 * moW; }
-    else { bScore += 0.5 * moW; pScore += 0.5 * moW; }
-
-    // 7. ENTROPY — weight 80
-    const enW = 80;
-    if (ent.predictability > 0.55) {
-        const freqPred = freq.pct.B > freq.pct.P ? 'B' : 'P';
-        if (freqPred === 'B') { bScore += 0.70 * enW; pScore += 0.30 * enW; }
-        else { pScore += 0.70 * enW; bScore += 0.30 * enW; }
-    } else if (ent.predictability < 0.25) {
-        tScore += 0.4 * enW; bScore += 0.32 * enW; pScore += 0.28 * enW;
-    } else {
-        bScore += 0.5 * enW; pScore += 0.5 * enW;
+    // 4. PATTERNS — weight 1.6
+    {
+        let b=0.46, p=0.44, t=0.10;
+        const pLastChar = patt.lastRun?.char;
+        const pPrevChar = patt.prevRun?.char;
+        if (patt.is22 && pPrevChar) {
+            // 2-2: next pair matches prev char
+            if (pPrevChar==='B') { b=0.72; p=0.24; t=0.04; }
+            else                 { b=0.24; p=0.72; t=0.04; }
+        } else if (patt.is33 && pLastChar) {
+            // 3-3: break
+            if (pLastChar==='B') { b=0.26; p=0.70; t=0.04; }
+            else                 { b=0.70; p=0.26; t=0.04; }
+        } else if (patt.is121 && pLastChar) {
+            if (pLastChar==='B') { b=0.62; p=0.34; t=0.04; }
+            else                 { b=0.34; p=0.62; t=0.04; }
+        } else if (patt.is212 && pLastChar) {
+            if (pLastChar==='B') { b=0.60; p=0.36; t=0.04; }
+            else                 { b=0.36; p=0.60; t=0.04; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.6 });
     }
 
-    // 8. WINDOWS — weight 130
-    const wiW = 130;
-    // Weighted avg of w5, w10, w20
-    const wB = (wins.w5.B/wins.w5.len)*0.5 + (wins.w10.B/wins.w10.len)*0.3 + (wins.w20.B/wins.w20.len)*0.2;
-    const wP = (wins.w5.P/wins.w5.len)*0.5 + (wins.w10.P/wins.w10.len)*0.3 + (wins.w20.P/wins.w20.len)*0.2;
-    const wT = (wins.w5.T/wins.w5.len)*0.5 + (wins.w10.T/wins.w10.len)*0.3 + (wins.w20.T/wins.w20.len)*0.2;
-    const wSum = wB + wP + wT || 1;
-    bScore += (wB/wSum) * wiW;
-    pScore += (wP/wSum) * wiW;
-    tScore += (wT/wSum) * wiW;
-
-    // 9. TIE SIGNAL — weight 100
-    const tiW = 100;
-    if (tie.signal) {
-        const tieWeight = clamp(tie.gapScore * 0.35, 0.15, 0.50);
-        tScore += tieWeight * tiW;
-        bScore += (1 - tieWeight) * 0.46 * tiW;
-        pScore += (1 - tieWeight) * 0.44 * tiW;
-    } else {
-        bScore += 0.46 * tiW; pScore += 0.44 * tiW; tScore += 0.10 * tiW;
+    // 5. MARKOV O1+O2 — weight 1.8
+    {
+        const mkP = markov.pred;
+        let b=0.46, p=0.44, t=0.10;
+        if (mkP.prob > 0.3) {
+            const conf = clamp(mkP.prob, 0.35, 0.75);
+            const rest = (1 - conf);
+            if (mkP.pred==='B') { b=conf; p=rest*0.85; t=rest*0.15; }
+            else if (mkP.pred==='P') { p=conf; b=rest*0.85; t=rest*0.15; }
+            else { t=conf; b=rest*0.85; p=rest*0.15; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.8 });
     }
 
-    // 10. MEAN REVERSION — weight 110
-    const mrW = 110;
-    if (mrev.revertTo === 'B') { bScore += 0.72 * mrW; pScore += 0.28 * mrW; }
-    else if (mrev.revertTo === 'P') { pScore += 0.72 * mrW; bScore += 0.28 * mrW; }
-    else { bScore += 0.5 * mrW; pScore += 0.5 * mrW; }
-
-    // 11. REGIME — weight 100
-    const rgW = 100;
-    const lastNT = [...arr].reverse().find(c => c !== 'T');
-    if (regime.regime === 'CHOP') {
-        // Chop → flip from last
-        if (lastNT === 'B') { pScore += 0.72 * rgW; bScore += 0.28 * rgW; }
-        else { bScore += 0.72 * rgW; pScore += 0.28 * rgW; }
-    } else if (regime.regime === 'STREAK') {
-        // Streak → continue
-        if (lastNT === 'B') { bScore += 0.68 * rgW; pScore += 0.32 * rgW; }
-        else { pScore += 0.68 * rgW; bScore += 0.32 * rgW; }
-    } else {
-        bScore += 0.5 * rgW; pScore += 0.5 * rgW;
+    // 6. EWM MOMENTUM — weight 1.2
+    {
+        let b=0.46, p=0.44, t=0.10;
+        const strength = clamp(Math.abs(mom.ewm), 0, 1);
+        if (mom.trend==='B') { b=0.46+strength*0.18; p=0.44-strength*0.18; }
+        else if (mom.trend==='P') { p=0.44+strength*0.18; b=0.46-strength*0.18; }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.2 });
     }
 
-    // 12. AUTOCORRELATION — weight 90
-    const acW = 90;
-    if (acf.type === 'TREND') {
-        if (lastNT === 'B') { bScore += 0.68 * acW; pScore += 0.32 * acW; }
-        else { pScore += 0.68 * acW; bScore += 0.32 * acW; }
-    } else if (acf.type === 'REVERT') {
-        if (lastNT === 'B') { pScore += 0.68 * acW; bScore += 0.32 * acW; }
-        else { bScore += 0.68 * acW; pScore += 0.32 * acW; }
-    } else {
-        bScore += 0.5 * acW; pScore += 0.5 * acW;
+    // 7. ENTROPY — weight 0.9
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (ent.predictability > 0.55) {
+            const dominant = freq.pct.B > freq.pct.P ? 'B' : 'P';
+            const boost = ent.predictability * 0.2;
+            if (dominant==='B') { b=0.46+boost; p=0.44-boost; }
+            else                { p=0.44+boost; b=0.46-boost; }
+        } else if (ent.predictability < 0.2) {
+            t=0.20; b=0.43; p=0.37;
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:0.9 });
     }
 
-    // 13. SESSION FATIGUE — weight 60
-    bScore += fatigue.fatigueBoost.B;
-    pScore += fatigue.fatigueBoost.P;
-    tScore += fatigue.fatigueBoost.T;
-
-    // 14. HOT/COLD — weight 90
-    const hcW = 90;
-    if (hotcold.coolDown === 'B') { bScore += 0.68 * hcW; pScore += 0.32 * hcW; }
-    else if (hotcold.coolDown === 'P') { pScore += 0.68 * hcW; bScore += 0.32 * hcW; }
-    else { bScore += 0.5 * hcW; pScore += 0.5 * hcW; }
-
-    // 15. PATTERN COMPLETION — weight 120
-    const pcW = 120;
-    if (patcomp.match && patcomp.predicted) {
-        const pConf = patcomp.confidence;
-        if (patcomp.predicted === 'B') { bScore += pConf * pcW; pScore += (1-pConf)*0.9 * pcW; }
-        else if (patcomp.predicted === 'P') { pScore += pConf * pcW; bScore += (1-pConf)*0.9 * pcW; }
-        else { tScore += pConf * pcW; bScore += (1-pConf)*0.46 * pcW; pScore += (1-pConf)*0.44 * pcW; }
-    } else {
-        bScore += 0.5 * pcW; pScore += 0.5 * pcW;
+    // 8. MULTI-WINDOW — weight 1.5
+    {
+        const wB = (wins.w5.B/wins.w5.len)*0.5 + (wins.w10.B/wins.w10.len)*0.3 + (wins.w20.B/wins.w20.len)*0.2;
+        const wP = (wins.w5.P/wins.w5.len)*0.5 + (wins.w10.P/wins.w10.len)*0.3 + (wins.w20.P/wins.w20.len)*0.2;
+        const wT = (wins.w5.T/wins.w5.len)*0.5 + (wins.w10.T/wins.w10.len)*0.3 + (wins.w20.T/wins.w20.len)*0.2;
+        const s = wB+wP+wT||1;
+        votes.push({ b:wB/s, p:wP/s, t:wT/s, w:1.5 });
     }
 
-    // 16. VOLATILITY CORRECTION — weight 80
-    const vlW = 80;
-    if (vol.isHigh) {
-        // High vol → trust frequency over patterns → re-weight toward freq
-        bScore += (freq.post.B/100) * vlW * 1.5;
-        pScore += (freq.post.P/100) * vlW * 1.5;
-        tScore += (freq.post.T/100) * vlW * 1.5;
-    } else if (vol.isLow) {
-        // Low vol → trust patterns more, already done above
-        bScore += 0.5 * vlW; pScore += 0.5 * vlW;
-    } else {
-        bScore += 0.5 * vlW; pScore += 0.5 * vlW;
+    // 9. TIE SIGNAL — weight 1.2
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (tie.signal) {
+            const tieBoost = clamp(tie.gapScore * 0.15, 0.05, 0.30);
+            t = 0.10 + tieBoost;
+            const rem = 1 - t;
+            b = rem * 0.51; p = rem * 0.49;
+        }
+        votes.push({ b, p, t, w:1.2 });
     }
 
-    // ── NORMALIZE ──
-    const total = bScore + pScore + tScore || 1;
-    let bRate = (bScore / total) * 100;
-    let pRate = (pScore / total) * 100;
-    let tRate = (tScore / total) * 100;
+    // 10. MEAN REVERSION — weight 1.3
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (mrev.revertTo !== 'NEUTRAL') {
+            const strength = clamp(mrev.strength / 20, 0.05, 0.25);
+            if (mrev.revertTo==='B') { b=0.46+strength; p=0.44-strength; }
+            else                     { p=0.44+strength; b=0.46-strength; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.3 });
+    }
 
-    // Soft clamp — prevent extremes
-    bRate = clamp(bRate, 30, 70);
-    pRate = clamp(pRate, 30, 70);
-    tRate = clamp(tRate, 4, 25);
+    // 11. REGIME — weight 1.5
+    {
+        let b=0.46, p=0.44, t=0.10;
+        const str = clamp(Math.abs(regime.switchRate - 0.5) * 2, 0, 0.35);
+        if (regime.regime==='CHOP') {
+            if (lastNT==='B') { b=0.46-str*0.5; p=0.44+str*0.5; }
+            else              { p=0.44-str*0.5; b=0.46+str*0.5; }
+        } else if (regime.regime==='STREAK') {
+            if (lastNT==='B') { b=0.46+str*0.5; p=0.44-str*0.5; }
+            else              { p=0.44+str*0.5; b=0.46-str*0.5; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.5 });
+    }
 
-    // Re-normalize after clamp
-    const sum2 = bRate + pRate + tRate;
-    bRate = (bRate / sum2) * 100;
-    pRate = (pRate / sum2) * 100;
-    tRate = (tRate / sum2) * 100;
+    // 12. AUTOCORRELATION — weight 1.1
+    {
+        let b=0.46, p=0.44, t=0.10;
+        const acfStr = clamp(Math.abs(acf.acf), 0, 0.8);
+        if (acf.type==='TREND') {
+            if (lastNT==='B') { b=0.46+acfStr*0.2; p=0.44-acfStr*0.2; }
+            else              { p=0.44+acfStr*0.2; b=0.46-acfStr*0.2; }
+        } else if (acf.type==='REVERT') {
+            if (lastNT==='B') { b=0.46-acfStr*0.2; p=0.44+acfStr*0.2; }
+            else              { p=0.44-acfStr*0.2; b=0.46+acfStr*0.2; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.1 });
+    }
+
+    // 13. SESSION FATIGUE — weight 0.7 (minor correction)
+    {
+        let b=0.46+fatigue.boost.B/100, p=0.44+fatigue.boost.P/100, t=0.10;
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:0.7 });
+    }
+
+    // 14. HOT/COLD — weight 1.1
+    {
+        let b=0.46, p=0.44, t=0.10;
+        const hcStr = clamp(Math.max(Math.abs(hotcold.bHot), Math.abs(hotcold.pHot)) * 2, 0, 0.28);
+        if (hotcold.coolDown==='B') { b=0.46+hcStr; p=0.44-hcStr; }
+        else if (hotcold.coolDown==='P') { p=0.44+hcStr; b=0.46-hcStr; }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.1 });
+    }
+
+    // 15. PATTERN COMPLETION — weight 1.4
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (patcomp.match && patcomp.predicted) {
+            const conf = clamp(patcomp.confidence, 0.3, 0.7);
+            const rest = 1 - conf;
+            if (patcomp.predicted==='B')      { b=conf; p=rest*0.85; t=rest*0.15; }
+            else if (patcomp.predicted==='P') { p=conf; b=rest*0.85; t=rest*0.15; }
+            else                              { t=conf; b=rest*0.52; p=rest*0.48; }
+        }
+        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.4 });
+    }
+
+    // 16. VOLATILITY INDEX — weight 1.0
+    {
+        let b=0.46, p=0.44, t=0.10;
+        if (vol.isHigh) {
+            // High vol → trust frequency
+            const tot = freq.post.B+freq.post.P+freq.post.T;
+            b=freq.post.B/tot; p=freq.post.P/tot; t=freq.post.T/tot;
+        }
+        // Low vol: leave at baseline (patterns already captured)
+        votes.push({ b, p, t, w:1.0 });
+    }
+
+    // ── WEIGHTED AVERAGE ──
+    let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
+    for (const v of votes) {
+        sumB += v.b * v.w;
+        sumP += v.p * v.w;
+        sumT += v.t * v.w;
+        totalW += v.w;
+    }
+    let bRate = (sumB / totalW) * 100;
+    let pRate = (sumP / totalW) * 100;
+    let tRate = (sumT / totalW) * 100;
+
+    // ── SOFT NORMALIZATION (không clamp cứng) ──
+    // Chỉ đảm bảo sum = 100 và min reasonable
+    const rawSum = bRate + pRate + tRate;
+    bRate = (bRate / rawSum) * 100;
+    pRate = (pRate / rawSum) * 100;
+    tRate = (tRate / rawSum) * 100;
+
+    // Floor nhẹ thôi, không làm mất spread
+    bRate = Math.max(bRate, 5);
+    pRate = Math.max(pRate, 5);
+    tRate = Math.max(tRate, 3);
+
+    // Re-normalize after floor
+    const floorSum = bRate + pRate + tRate;
+    bRate = (bRate / floorSum) * 100;
+    pRate = (pRate / floorSum) * 100;
+    tRate = (tRate / floorSum) * 100;
 
     // ── PREDICTION ──
     let prediction;
-    if (tie.signal && tRate > 18 && tRate > bRate * 0.75 && tRate > pRate * 0.75) {
+    if (tie.signal && tRate > 20 && tRate > Math.min(bRate, pRate) * 0.9) {
         prediction = 'Tie';
-    } else if (bRate > pRate) {
+    } else if (bRate >= pRate) {
         prediction = 'Banker';
     } else {
         prediction = 'Player';
@@ -626,7 +517,7 @@ function predictBCR(history, tableId = 'UNKNOWN') {
     let b = Math.round(bRate);
     let p = Math.round(pRate);
     let t = Math.round(tRate);
-    const rSum = b + p + t;
+    const rSum = b+p+t;
     if (rSum !== 100) {
         const diff = 100 - rSum;
         if (b >= p && b >= t) b += diff;
@@ -635,73 +526,52 @@ function predictBCR(history, tableId = 'UNKNOWN') {
     }
 
     // ── CONFIDENCE ──
-    const raw = Math.max(b, p, t);
-    let confidence = clamp(Math.round(raw * 0.9 + ent.predictability * 10), 50, 92);
-    if (patcomp.match) confidence = clamp(confidence + 3, 50, 92);
+    // Confidence = độ chắc chắn = khoảng cách giữa bên dẫn đầu và bên thứ 2
+    const top = Math.max(b, p);
+    const second = [b, p, t].sort((a,b)=>b-a)[1];
+    const spread = top - second;
+    // Spread 5 = conf 55, spread 15 = conf 70, spread 25 = conf 85
+    let confidence = clamp(50 + spread * 1.5 + ent.predictability * 8, 50, 88);
+    if (patcomp.match) confidence = clamp(confidence + 3, 50, 88);
+    confidence = Math.round(confidence);
 
     // ── PATTERN LABEL ──
     let pattern = 'Cầu đan xen';
-    if (prediction === 'Tie' && tie.signal) {
-        pattern = `🔮 TIE SIGNAL! Gap=${Math.round(tie.avgGap)}, Freq=${Math.round(tie.freq)}%, Overdue=${Math.round(tie.gapScore*100)}%`;
-    } else if (regime.regime === 'CHOP') {
-        pattern = `Chop Regime (Switch=${Math.round(regime.switchRate*100)}%) → Đảo chiều`;
-    } else if (regime.regime === 'STREAK') {
-        const ls = streak.last;
-        pattern = `Streak Regime — Dây ${ls.char} x${ls.len} → Tiếp tục`;
-    } else if (patt.is22) {
-        pattern = `Cầu 2-2 Pattern đang hoạt động`;
-    } else if (patt.is33) {
-        pattern = `Cầu 3-3 Pattern`;
-    } else if (patt.is121) {
-        pattern = `Cầu 1-2-1 Pattern`;
-    } else if (patt.is212) {
-        pattern = `Cầu 2-1-2 Pattern`;
-    } else if (zigzag.isZZ) {
-        pattern = `Zigzag Mode (10 ván: ${zigzag.zz10} lần đổi)`;
-    } else if (patcomp.match) {
-        pattern = `Pattern Completion Match (conf=${Math.round(patcomp.confidence*100)}%)`;
-    } else if (mrev.revertTo !== 'NEUTRAL') {
-        pattern = `Mean Reversion → ${mrev.revertTo} (dev=${Math.round(mrev.strength)}%)`;
-    } else {
-        pattern = `ACF:${acf.type} | Mom:${mom.trend} | Vol:${Math.round(vol.vol*100)}%`;
-    }
+    if (prediction==='Tie' && tie.signal) {
+        pattern = `🔮 TIE SIGNAL! Gap=${Math.round(tie.avgGap||0)}, Freq=${Math.round(tie.freq)}%, Score=${Math.round(tie.gapScore*100)}%`;
+    } else if (regime.regime==='CHOP') {
+        pattern = `Chop Regime (${Math.round(regime.switchRate*100)}% switches) → Đảo chiều`;
+    } else if (regime.regime==='STREAK') {
+        pattern = `Streak Regime — ${streak.last.char}x${streak.last.len} → Tiếp tục`;
+    } else if (patt.is22) { pattern = `Cầu 2-2 đang hoạt động`; }
+    else if (patt.is33)   { pattern = `Cầu 3-3`; }
+    else if (patt.is121)  { pattern = `Cầu 1-2-1`; }
+    else if (patt.is212)  { pattern = `Cầu 2-1-2`; }
+    else if (zigzag.isZZ) { pattern = `Zigzag (10 ván: ${zigzag.zz10} lần đổi)`; }
+    else if (patcomp.match) { pattern = `Pattern Completion (conf=${Math.round(patcomp.confidence*100)}%)`; }
+    else if (mrev.revertTo!=='NEUTRAL') { pattern = `Mean Reversion → ${mrev.revertTo} (dev=${Math.round(mrev.strength)}%)`; }
+    else { pattern = `ACF:${acf.type} | Mom:${mom.trend} | Vol:${Math.round(vol.vol*100)}%`; }
 
-    // ── STORE PREDICTION FOR SESSION FATIGUE ──
+    // ── STORE SESSION ──
     if (!predictionHistory[tableId]) predictionHistory[tableId] = [];
     predictionHistory[tableId].push(prediction[0]);
     if (predictionHistory[tableId].length > 20) predictionHistory[tableId].shift();
 
     return {
-        prediction,
-        bankerRate: Math.max(b, 5),
-        playerRate: Math.max(p, 5),
-        tieRate: Math.max(t, 3),
-        pattern,
-        cau_goc: history,
-        confidence,
-        tie_signal: tie.signal,
-        tie_score: Math.round(tie.freq),
+        prediction, bankerRate:Math.max(b,4), playerRate:Math.max(p,4), tieRate:Math.max(t,2),
+        pattern, cau_goc:history, confidence,
+        tie_signal:tie.signal, tie_score:Math.round(tie.freq),
         stats: {
-            B: Math.round(freq.pct.B),
-            P: Math.round(freq.pct.P),
-            T: Math.round(freq.pct.T),
-            regime: regime.regime,
-            acf: acf.type,
-            momentum: mom.trend,
-            streak: `${streak.last.char}x${streak.last.len}`,
-            zigzag: zigzag.zz10,
-            pattern22: patt.is22,
-            pattern33: patt.is33,
-            pattern121: patt.is121,
-            patternCompletion: patcomp.match,
-            hotSide: hotcold.hotSide,
-            meanRevert: mrev.revertTo,
-            volatility: Math.round(vol.vol * 100),
-            entropy: Math.round(ent.entropy * 10) / 10,
-            predictability: Math.round(ent.predictability * 100),
-            tieGap: Math.round(tie.avgGap || 0),
-            tieFrequency: Math.round(tie.freq),
-            tieGapScore: Math.round((tie.gapScore || 0) * 100)
+            B:Math.round(freq.pct.B), P:Math.round(freq.pct.P), T:Math.round(freq.pct.T),
+            regime:regime.regime, acf:acf.type, momentum:mom.trend,
+            streak:`${streak.last.char}x${streak.last.len}`,
+            zigzag:zigzag.zz10, pattern22:patt.is22, pattern33:patt.is33,
+            patternCompletion:patcomp.match, hotSide:hotcold.hotSide,
+            meanRevert:mrev.revertTo, volatility:Math.round(vol.vol*100),
+            entropy:Math.round(ent.entropy*10)/10,
+            predictability:Math.round(ent.predictability*100),
+            tieGap:Math.round(tie.avgGap||0), tieFreq:Math.round(tie.freq),
+            spread:spread
         }
     };
 }
@@ -711,13 +581,10 @@ function predictBCR(history, tableId = 'UNKNOWN') {
 // ============================================================
 async function fetchTableData(tableId) {
     try {
-        const normalizedId = tableId.toUpperCase();
-        const url = `${API_BASE}/api/baccarat/${normalizedId}`;
+        const url = `${API_BASE}/api/baccarat/${tableId.toUpperCase()}`;
         console.log(`📡 Gọi API: ${url}`);
         const response = await axios.get(url, { timeout: 15000 });
-        if (response.data?.success && response.data?.data) {
-            return response.data.data.result || '';
-        }
+        if (response.data?.success && response.data?.data) return response.data.data.result || '';
         return '';
     } catch (error) {
         console.error(`❌ Lỗi bàn ${tableId}:`, error.message);
@@ -729,35 +596,35 @@ app.get('/api/predict/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
         const cauGoc = await fetchTableData(tableId);
-        if (!cauGoc) return res.json({ success: false, message: `Không tìm thấy bàn ${tableId}` });
+        if (!cauGoc) return res.json({ success:false, message:`Không tìm thấy bàn ${tableId}` });
 
-        const oldData = lastData[tableId] || '';
-        const isNewData = cauGoc !== oldData && cauGoc.length > oldData.length;
+        const oldData = lastData[tableId]||'';
+        const isNewData = cauGoc!==oldData && cauGoc.length>oldData.length;
         lastData[tableId] = cauGoc;
-        if (!sessionData[tableId]) sessionData[tableId] = 0;
+        if (!sessionData[tableId]) sessionData[tableId]=0;
         if (isNewData) sessionData[tableId]++;
 
         const result = predictBCR(cauGoc, tableId);
 
         res.json({
-            success: true,
-            bàn: `Bàn ${tableId}`,
-            phiên: sessionData[tableId],
-            cầu_gốc: cauGoc,
-            dự_đoán: result.prediction,
-            tỉ_lệ: `${Math.max(result.bankerRate, result.playerRate, result.tieRate)}%`,
-            banker_rate: `${result.bankerRate}%`,
-            player_rate: `${result.playerRate}%`,
-            dự_đoán_tie: result.tie_signal ? 'CÓ' : 'KHÔNG',
-            tỉ_lệ_tie: `${result.tieRate}%`,
-            cầu: result.pattern,
-            confidence: `${result.confidence}%`,
-            stats: result.stats,
-            engine: 'v15.0.0-ULTRA-16METHOD',
-            id: '@tranhoang2286'
+            success:true,
+            bàn:`Bàn ${tableId}`,
+            phiên:sessionData[tableId],
+            cầu_gốc:cauGoc,
+            dự_đoán:result.prediction,
+            banker_rate:`${result.bankerRate}%`,
+            player_rate:`${result.playerRate}%`,
+            tie_rate:`${result.tieRate}%`,
+            dự_đoán_tie:result.tie_signal?'CÓ':'KHÔNG',
+            cầu:result.pattern,
+            confidence:`${result.confidence}%`,
+            spread:`${result.stats.spread}%`,
+            stats:result.stats,
+            engine:'v15.1.0-FIXED',
+            id:'@tranhoang2286'
         });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+    } catch(error) {
+        res.status(500).json({ success:false, error:error.message });
     }
 });
 
@@ -765,37 +632,33 @@ app.get('/api/predict/all', async (req, res) => {
     try {
         const tableIds = ['C01','C02','C04','C05','C06','C07','C08','C09','C10','C11','C15','C16','C17','C18','C19','C20'];
         const results = [];
-
         for (const id of tableIds) {
             const cauGoc = await fetchTableData(id);
             if (!cauGoc) continue;
-
-            const oldData = lastData[id] || '';
-            const isNewData = cauGoc !== oldData && cauGoc.length > oldData.length;
+            const oldData = lastData[id]||'';
+            const isNewData = cauGoc!==oldData && cauGoc.length>oldData.length;
             lastData[id] = cauGoc;
-            if (!sessionData[id]) sessionData[id] = 0;
+            if (!sessionData[id]) sessionData[id]=0;
             if (isNewData) sessionData[id]++;
-
             const result = predictBCR(cauGoc, id);
             results.push({
-                bàn: `Bàn ${id}`,
-                phiên: sessionData[id],
-                cầu_gốc: cauGoc,
-                dự_đoán: result.prediction,
-                tỉ_lệ: `${Math.max(result.bankerRate, result.playerRate, result.tieRate)}%`,
-                banker_rate: `${result.bankerRate}%`,
-                player_rate: `${result.playerRate}%`,
-                dự_đoán_tie: result.tie_signal ? 'CÓ' : 'KHÔNG',
-                tỉ_lệ_tie: `${result.tieRate}%`,
-                cầu: result.pattern,
-                confidence: `${result.confidence}%`,
-                regime: result.stats.regime
+                bàn:`Bàn ${id}`,
+                phiên:sessionData[id],
+                cầu_gốc:cauGoc,
+                dự_đoán:result.prediction,
+                banker_rate:`${result.bankerRate}%`,
+                player_rate:`${result.playerRate}%`,
+                tie_rate:`${result.tieRate}%`,
+                dự_đoán_tie:result.tie_signal?'CÓ':'KHÔNG',
+                cầu:result.pattern,
+                confidence:`${result.confidence}%`,
+                spread:`${result.stats.spread}%`,
+                regime:result.stats.regime
             });
         }
-
-        res.json({ success: true, data: results, total: results.length, engine: 'v15.0.0-ULTRA', id: '@tranhoang2286' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.json({ success:true, data:results, total:results.length, engine:'v15.1.0-FIXED', id:'@tranhoang2286' });
+    } catch(error) {
+        res.status(500).json({ success:false, error:error.message });
     }
 });
 
@@ -803,56 +666,34 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
         const result = await fetchTableData(tableId);
-        if (result) {
-            res.json({ success: true, data: { table: tableId, result, shoeId: '', round: '' } });
-        } else {
-            res.json({ success: false, message: `Không tìm thấy bàn ${tableId}` });
-        }
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        if (result) res.json({ success:true, data:{ table:tableId, result, shoeId:'', round:'' } });
+        else res.json({ success:false, message:`Không tìm thấy bàn ${tableId}` });
+    } catch(error) {
+        res.status(500).json({ success:false, error:error.message });
     }
 });
 
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT PREDICTION ULTRA',
-        version: '15.0.0',
-        author: '@tranhoang2286',
-        api_source: API_BASE,
-        methods: [
-            '1. Bayesian Frequency',     '2. Streak (Enhanced)',
-            '3. Zigzag (Windowed)',       '4. Patterns (2-2/3-3/1-2-1/2-1-2)',
-            '5. Markov (Order 1+2)',      '6. Momentum (EWM)',
-            '7. Entropy',                 '8. Multi-Window Bias',
-            '9. Tie Cycle Detection',     '10. Mean Reversion',
-            '11. Regime (Chop/Streak)',   '12. Autocorrelation',
-            '13. Session Fatigue',        '14. Hot/Cold Analysis',
-            '15. Pattern Completion',     '16. Volatility Index'
-        ],
-        endpoints: {
-            'Dự đoán 1 bàn': '/api/predict/:tableId',
-            'Dự đoán tất cả': '/api/predict/all',
-            'Lấy dữ liệu bàn': '/api/baccarat/:tableId'
+        name:'BACCARAT PREDICTION ULTRA',
+        version:'15.1.0-FIXED',
+        author:'@tranhoang2286',
+        fix:'Bỏ hard-clamp, dùng weighted vote system, spread tự nhiên',
+        endpoints:{
+            'Dự đoán 1 bàn':'/api/predict/:tableId',
+            'Dự đoán tất cả':'/api/predict/all',
+            'Lấy dữ liệu bàn':'/api/baccarat/:tableId'
         }
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('══════════════════════════════════════════');
-    console.log('🃏 BACCARAT PREDICTION ULTRA — v15.0.0');
+    console.log('🃏 BACCARAT PREDICTION — v15.1.0 FIXED');
     console.log('══════════════════════════════════════════');
-    console.log(`🚀 Server: http://localhost:${PORT}`);
-    console.log(`📡 API Source: ${API_BASE}`);
-    console.log('📌 16 PHƯƠNG PHÁP PHÂN TÍCH:');
-    console.log('   1. Bayesian Freq    2. Streak Enhanced');
-    console.log('   3. Zigzag Window    4. Multi-Pattern');
-    console.log('   5. Markov O1+O2     6. EWM Momentum');
-    console.log('   7. Entropy          8. Multi-Window');
-    console.log('   9. Tie Cycle       10. Mean Reversion');
-    console.log('  11. Regime Detect   12. Autocorrelation');
-    console.log('  13. Fatigue Corr    14. Hot/Cold');
-    console.log('  15. Pat Completion  16. Volatility Idx');
-    console.log('══════════════════════════════════════════');
-    console.log(`👤 Author: @tranhoang2286`);
+    console.log(`🚀 http://localhost:${PORT}`);
+    console.log('🔧 FIX: Weighted vote system, no hard-clamp');
+    console.log('📌 16 methods, dynamic spread');
+    console.log(`👤 @tranhoang2286`);
     console.log('══════════════════════════════════════════');
 });
