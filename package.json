@@ -1,7 +1,7 @@
 {
   "name": "baccarat-vip-engine",
-  "version": "5.0.0",
-  "description": "BACCARAT VIP - HỌC MÁY + 30 CÔNG THỨC NHẬN DIỆN CẦU BCR - KHÔNG RANDOM",
+  "version": "2.0.0",
+  "description": "BACCARAT VIP - 20 CÔNG THỨC NHẬN DIỆN CẦU - KHÔNG RANDOM",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,7 +11,6 @@
     "baccarat",
     "vip",
     "pattern-recognition",
-    "machine-learning",
     "prediction",
     "bcr"
   ],
@@ -24,5 +23,8 @@
   },
   "devDependencies": {
     "nodemon": "^2.0.22"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
