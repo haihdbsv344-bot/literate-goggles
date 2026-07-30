@@ -25,23 +25,148 @@ function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
 function mean(arr) { return arr.length ? sum(arr) / arr.length : 0; }
 
 // ============================================================
-// 20 MODULES - MỖI BÀN PHÂN TÍCH ĐỘC LẬP
+// PHÂN TÍCH THỰC TẾ - KHÔNG CHẠY THEO CẦU MÙ QUÁNG
 // ============================================================
 
-// M01: BAYESIAN FREQUENCY
-function m01_bayesFreq(arr) {
-    const prior = { B: 45.86, P: 44.62, T: 9.52 };
+// M01: PHÂN TÍCH TẦN SUẤT THỰC TẾ
+function m01_realFrequency(arr) {
     const cnt = { B: 0, P: 0, T: 0 };
     for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
-    const N = arr.length, a = 30;
-    const post = {};
-    for (const k of ['B','P','T'])
-        post[k] = (cnt[k] + (prior[k]/100)*a) / (N + a);
-    return { vote: post, weight: 1.2 };
+    const N = arr.length;
+    
+    const realB = (cnt.B / N) * 100;
+    const realP = (cnt.P / N) * 100;
+    const realT = (cnt.T / N) * 100;
+    
+    const stdB = 45.86, stdP = 44.62, stdT = 9.52;
+    const devB = realB - stdB;
+    const devP = realP - stdP;
+    const devT = realT - stdT;
+    
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    
+    // Cửa nào đang thiếu so với chuẩn -> khả năng về
+    if (devB < -5) {
+        const boost = clamp(Math.abs(devB) / 30, 0.05, 0.25);
+        vote.B = 0.46 + boost;
+        vote.P = 0.44 - boost * 0.6;
+        vote.T = 0.10 - boost * 0.4;
+    }
+    else if (devP < -5) {
+        const boost = clamp(Math.abs(devP) / 30, 0.05, 0.25);
+        vote.P = 0.44 + boost;
+        vote.B = 0.46 - boost * 0.6;
+        vote.T = 0.10 - boost * 0.4;
+    }
+    else if (devT < -3) {
+        const boost = clamp(Math.abs(devT) / 20, 0.02, 0.15);
+        vote.T = 0.10 + boost;
+        vote.B = 0.46 - boost * 0.5;
+        vote.P = 0.44 - boost * 0.5;
+    }
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 2.0,
+        meta: { realB: Math.round(realB*10)/10, realP: Math.round(realP*10)/10, realT: Math.round(realT*10)/10, devB: Math.round(devB*10)/10, devP: Math.round(devP*10)/10 }
+    };
 }
 
-// M02: STREAK DYNAMICS
-function m02_streak(arr) {
+// M02: PHÂN TÍCH CỬA ĐANG "NGUỘI" (COLD)
+function m02_coldAnalysis(arr) {
+    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
+    
+    const recent = arr.slice(-20);
+    const cnt = { B: 0, P: 0, T: 0 };
+    for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
+    
+    let minCount = 20, minKey = 'B';
+    for (const k of ['B', 'P', 'T']) {
+        if (cnt[k] < minCount) {
+            minCount = cnt[k];
+            minKey = k;
+        }
+    }
+    
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    if (minCount < 5) {
+        const boost = clamp((5 - minCount) / 10, 0.05, 0.30);
+        if (minKey === 'B') {
+            vote.B = 0.46 + boost;
+            vote.P = 0.44 - boost * 0.6;
+            vote.T = 0.10 - boost * 0.4;
+        } else if (minKey === 'P') {
+            vote.P = 0.44 + boost;
+            vote.B = 0.46 - boost * 0.6;
+            vote.T = 0.10 - boost * 0.4;
+        } else {
+            vote.T = 0.10 + boost;
+            vote.B = 0.46 - boost * 0.5;
+            vote.P = 0.44 - boost * 0.5;
+        }
+    }
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.8,
+        meta: { cold: minKey, count: minCount }
+    };
+}
+
+// M03: PHÂN TÍCH ZIGZAG (ĐẢO CHIỀU)
+function m03_zigzagAnalysis(arr) {
+    if (arr.length < 15) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
+    
+    const recent = arr.slice(-15);
+    let switches = 0;
+    for (let i = 1; i < recent.length; i++) {
+        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
+            switches++;
+        }
+    }
+    const switchRate = switches / (recent.length - 1);
+    
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    const last = recent[recent.length - 1];
+    
+    if (switchRate > 0.6) {
+        // CHOP mode -> đảo chiều
+        if (last === 'B') {
+            vote.B = 0.40;
+            vote.P = 0.50;
+            vote.T = 0.10;
+        } else if (last === 'P') {
+            vote.B = 0.50;
+            vote.P = 0.40;
+            vote.T = 0.10;
+        }
+    } else if (switchRate < 0.3) {
+        // STREAK mode -> theo xu hướng (nhưng giảm dần)
+        if (last === 'B') {
+            vote.B = 0.48;
+            vote.P = 0.42;
+            vote.T = 0.10;
+        } else if (last === 'P') {
+            vote.B = 0.42;
+            vote.P = 0.48;
+            vote.T = 0.10;
+        }
+    }
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.6,
+        meta: { switchRate: Math.round(switchRate*100), mode: switchRate > 0.6 ? 'CHOP' : switchRate < 0.3 ? 'STREAK' : 'MIXED' }
+    };
+}
+
+// M04: PHÂN TÍCH PATTERN THỰC TẾ
+function m04_patternAnalysis(arr) {
+    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
+    
     const runs = [];
     let cur = { c: arr[0], n: 1 };
     for (let i = 1; i < arr.length; i++) {
@@ -49,452 +174,208 @@ function m02_streak(arr) {
         else { runs.push({...cur}); cur = { c: arr[i], n: 1 }; }
     }
     runs.push({...cur});
-    const last = runs[runs.length - 1];
-
-    const contTable = { 1: 0.507, 2: 0.487, 3: 0.461, 4: 0.432, 5: 0.398 };
-    const contP = contTable[Math.min(last.n, 5)] || 0.38;
-    const revP  = (1 - contP) * 0.97;
-    const tieP  = (1 - contP) * 0.03;
-
+    
+    const L = runs.length;
+    if (L < 3) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    
+    const lastRuns = runs.slice(-3);
+    const rn = lastRuns.map(r => r.n);
+    const rc = lastRuns.map(r => r.c);
+    
     let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    if (last.c === 'B') { vote = { B: contP, P: revP, T: tieP }; }
-    else if (last.c === 'P') { vote = { B: revP, P: contP, T: tieP }; }
-    else { vote = { B: 0.46, P: 0.44, T: 0.10 }; }
-
-    return { vote, weight: 2.0, meta: { streak: `${last.c}x${last.n}`, contP } };
-}
-
-// M03: ZIGZAG WINDOWED
-function m03_zigzag(arr) {
-    function zzRate(a) {
-        let zz = 0;
-        for (let i = 1; i < a.length - 1; i++) {
-            if (a[i] !== 'T' && a[i-1] !== 'T' && a[i+1] !== 'T'
-                && a[i] !== a[i-1] && a[i] !== a[i+1]) zz++;
+    let pattern = 'NONE';
+    
+    if (rn[0] === 1 && rn[1] === 2 && rn[2] === 1) {
+        pattern = '1-2-1';
+        const target = rc[1];
+        if (target === 'B') {
+            vote.B = 0.58;
+            vote.P = 0.32;
+            vote.T = 0.10;
+        } else {
+            vote.B = 0.32;
+            vote.P = 0.58;
+            vote.T = 0.10;
         }
-        return zz / (a.length - 2 || 1);
     }
-    const zz10 = zzRate(arr.slice(-10));
-    const zz20 = zzRate(arr.slice(-20));
-    const zzScore = zz10 * 0.7 + zz20 * 0.3;
-    const lastNT = [...arr].reverse().find(c => c !== 'T') || 'B';
-
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    if (zzScore > 0.55) {
-        const flipStr = zzScore * 0.5;
-        if (lastNT === 'B') vote = { B: 0.46 - flipStr, P: 0.44 + flipStr, T: 0.10 };
-        else                vote = { B: 0.46 + flipStr, P: 0.44 - flipStr, T: 0.10 };
+    else if (rn[0] === 2 && rn[1] === 1 && rn[2] === 2) {
+        pattern = '2-1-2';
+        const flip = rc[2] === 'B' ? 'P' : 'B';
+        if (flip === 'B') {
+            vote.B = 0.55;
+            vote.P = 0.35;
+            vote.T = 0.10;
+        } else {
+            vote.B = 0.35;
+            vote.P = 0.55;
+            vote.T = 0.10;
+        }
     }
+    else if (rn[0] === 2 && rn[1] === 2 && rn[2] === 2) {
+        pattern = '2-2-2';
+        const target = rc[0];
+        if (target === 'B') {
+            vote.B = 0.55;
+            vote.P = 0.35;
+            vote.T = 0.10;
+        } else {
+            vote.B = 0.35;
+            vote.P = 0.55;
+            vote.T = 0.10;
+        }
+    }
+    
     const s = vote.B + vote.P + vote.T;
-    return { vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, weight: 1.6, meta: { zzScore } };
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.7,
+        meta: { pattern }
+    };
 }
 
-// M04: MULTI-PATTERN
-function m04_patterns(arr) {
-    const runs = [];
-    let cur = { c: arr[0], n: 1 };
-    for (let i = 1; i < arr.length; i++) {
-        if (arr[i] === cur.c) cur.n++;
-        else { runs.push({...cur}); cur = { c: arr[i], n: 1 }; }
+// M05: PHÂN TÍCH BIẾN ĐỘNG (VOLATILITY)
+function m05_volatilityAnalysis(arr) {
+    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    
+    const recent = arr.slice(-20);
+    let switches = 0;
+    for (let i = 1; i < recent.length; i++) {
+        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
+            switches++;
+        }
     }
-    runs.push({...cur});
-    const R = runs;
-    const L = R.length;
-    const rn = R.map(r => r.n);
-    const rc = R.map(r => r.c);
-
-    let matchedPatt = 'NONE';
+    const vol = switches / (recent.length - 1);
+    
     let vote = { B: 0.46, P: 0.44, T: 0.10 };
-
-    if (L >= 3 && rn[L-1]===2 && rn[L-2]===2 && rn[L-3]===2) {
-        matchedPatt = '2-2-2';
-        const target = rc[L-3];
-        if (target==='B') vote = { B: 0.72, P: 0.24, T: 0.04 };
-        else              vote = { B: 0.24, P: 0.72, T: 0.04 };
+    if (vol < 0.3) {
+        const last = recent[recent.length - 1];
+        if (last === 'B') {
+            vote.B = 0.52;
+            vote.P = 0.38;
+            vote.T = 0.10;
+        } else if (last === 'P') {
+            vote.B = 0.38;
+            vote.P = 0.52;
+            vote.T = 0.10;
+        }
     }
-    else if (L >= 2 && rn[L-1]===2 && rn[L-2]===2 && rc[L-1]!==rc[L-2]) {
-        matchedPatt = '2-2';
-        const target = rc[L-2];
-        if (target==='B') vote = { B: 0.68, P: 0.28, T: 0.04 };
-        else              vote = { B: 0.28, P: 0.68, T: 0.04 };
-    }
-    else if (L >= 2 && rn[L-1]===3 && rn[L-2]===3) {
-        matchedPatt = '3-3';
-        const brk = rc[L-1]==='B' ? 'P' : 'B';
-        if (brk==='B') vote = { B: 0.70, P: 0.26, T: 0.04 };
-        else           vote = { B: 0.26, P: 0.70, T: 0.04 };
-    }
-    else if (L >= 3 && rn[L-3]===1 && rn[L-2]===2 && rn[L-1]===1) {
-        matchedPatt = '1-2-1';
-        const target = rc[L-2];
-        if (target==='B') vote = { B: 0.65, P: 0.31, T: 0.04 };
-        else              vote = { B: 0.31, P: 0.65, T: 0.04 };
-    }
-    else if (L >= 3 && rn[L-3]===2 && rn[L-2]===1 && rn[L-1]===2) {
-        matchedPatt = '2-1-2';
-        const flip = rc[L-1]==='B' ? 'P' : 'B';
-        if (flip==='B') vote = { B: 0.63, P: 0.33, T: 0.04 };
-        else            vote = { B: 0.33, P: 0.63, T: 0.04 };
-    }
-    else if (L >= 5 && rn.slice(-5).every(n => n===1)) {
-        matchedPatt = 'CHOP5';
-        const lastC = rc[L-1];
-        if (lastC==='B') vote = { B: 0.25, P: 0.68, T: 0.07 };
-        else             vote = { B: 0.68, P: 0.25, T: 0.07 };
-    }
-
+    
     const s = vote.B + vote.P + vote.T;
-    return { vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, weight: 1.8, meta: { pattern: matchedPatt } };
-}
-
-// M05: MARKOV ORDER 1+2
-function m05_markov(arr) {
-    const m1 = { B:{B:0,P:0,T:0}, P:{B:0,P:0,T:0}, T:{B:0,P:0,T:0} };
-    for (let i = 0; i < arr.length - 1; i++) {
-        if (m1[arr[i]]) m1[arr[i]][arr[i+1]]++;
-    }
-    const m2 = {};
-    for (let i = 0; i < arr.length - 2; i++) {
-        const k = arr[i]+arr[i+1];
-        if (!m2[k]) m2[k] = {B:0,P:0,T:0};
-        m2[k][arr[i+2]]++;
-    }
-    function normalize(obj) {
-        const t = sum(Object.values(obj));
-        if (!t) return {B:0.46,P:0.44,T:0.10};
-        return {B:obj.B/t, P:obj.P/t, T:obj.T/t};
-    }
-    const last1 = arr[arr.length-1];
-    const last2 = arr.slice(-2).join('');
-    const v1 = normalize(m1[last1]||{B:1,P:1,T:0});
-    const v2 = m2[last2] ? normalize(m2[last2]) : v1;
-
-    const w2 = arr.length > 40 ? 0.65 : 0.35;
-    const vote = {
-        B: v1.B*(1-w2) + v2.B*w2,
-        P: v1.P*(1-w2) + v2.P*w2,
-        T: v1.T*(1-w2) + v2.T*w2,
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.2,
+        meta: { vol: Math.round(vol*100) }
     };
-    const s = vote.B+vote.P+vote.T;
-    return { vote: {B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight: 2.2 };
 }
 
-// M06: ORDER-3 MARKOV
-function m06_markov3(arr) {
-    if (arr.length < 10) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
-    const m3 = {};
-    for (let i = 0; i < arr.length - 3; i++) {
-        const k = arr[i]+arr[i+1]+arr[i+2];
-        if (!m3[k]) m3[k] = {B:0,P:0,T:0};
-        m3[k][arr[i+3]]++;
+// M06: PHÂN TÍCH CHU KỲ TIE
+function m06_tieCycle(arr) {
+    const tp = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 'T') tp.push(i);
     }
-    const last3 = arr.slice(-3).join('');
-    const trans = m3[last3];
-    if (!trans) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    const t = sum(Object.values(trans));
-    if (!t) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    const vote = {B:trans.B/t, P:trans.P/t, T:trans.T/t};
-    const confidence = clamp(t / 5, 0.2, 1.0);
-    return { vote, weight: 2.0 * confidence };
-}
-
-// M07: EWM MOMENTUM
-function m07_momentum(arr) {
-    const vals = arr.map(c => c==='B'?1 : c==='P'?-1 : 0);
-    let ewm = vals[0]||0;
-    const alpha = 0.25;
-    for (let i = 1; i < vals.length; i++) ewm = alpha*vals[i] + (1-alpha)*ewm;
-
-    let vote = {B:0.46, P:0.44, T:0.10};
-    const str = clamp(Math.abs(ewm)*1.5, 0, 0.30);
-    if (ewm > 0.12)       vote = {B:0.46+str, P:0.44-str, T:0.10};
-    else if (ewm < -0.12) vote = {B:0.46-str, P:0.44+str, T:0.10};
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.4, meta:{ewm} };
-}
-
-// M08: MULTI-WINDOW
-function m08_windows(arr) {
-    function wv(n) {
-        const w = arr.slice(-n);
-        const t = w.length||1;
-        return {B:w.filter(c=>c==='B').length/t, P:w.filter(c=>c==='P').length/t, T:w.filter(c=>c==='T').length/t};
+    
+    if (tp.length < 2) return { vote: {B:0.46,P:0.44,T:0.10}, weight: 0.5 };
+    
+    const gaps = [];
+    for (let i = 1; i < tp.length; i++) {
+        gaps.push(tp[i] - tp[i-1]);
     }
-    const w3=wv(3), w7=wv(7), w15=wv(15), w30=wv(30);
-    const vote = {
-        B: w3.B*0.40 + w7.B*0.30 + w15.B*0.20 + w30.B*0.10,
-        P: w3.P*0.40 + w7.P*0.30 + w15.P*0.20 + w30.P*0.10,
-        T: w3.T*0.40 + w7.T*0.30 + w15.T*0.20 + w30.T*0.10,
+    const avgGap = mean(gaps);
+    const lastGap = arr.length - 1 - tp[tp.length - 1];
+    const gapRatio = lastGap / avgGap;
+    
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    let tieWeight = 1.0;
+    
+    if (gapRatio > 1.2 && avgGap < 15) {
+        const boost = clamp(gapRatio * 0.08, 0.02, 0.15);
+        vote.T = 0.10 + boost;
+        vote.B = 0.46 - boost * 0.5;
+        vote.P = 0.44 - boost * 0.5;
+        tieWeight = 1.8;
+    }
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: tieWeight,
+        meta: { avgGap: Math.round(avgGap), gapRatio: Math.round(gapRatio*100)/100 }
     };
-    const s = vote.B+vote.P+vote.T||1;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.6 };
 }
 
-// M09: TIE CYCLE
-function m09_tie(arr) {
-    const tp = arr.reduce((a,c,i)=>{ if(c==='T') a.push(i); return a; },[]);
-    const freq = (tp.length/arr.length)*100;
-    let vote = {B:0.46, P:0.44, T:0.10};
-    let tieW = 1.0;
-
-    if (tp.length >= 3) {
-        const gaps = [];
-        for (let i=1; i<tp.length; i++) gaps.push(tp[i]-tp[i-1]);
-        const avgGap = mean(gaps);
-        const stdGap = Math.sqrt(mean(gaps.map(g=>(g-avgGap)**2)));
-        const lastGap = arr.length-1-tp[tp.length-1];
-        const gapScore = lastGap/avgGap;
-        const stability = 1 - clamp(stdGap/avgGap, 0, 1);
-
-        if (gapScore >= 0.8 && stability > 0.4 && freq > 6) {
-            const tieBoost = clamp(gapScore * stability * 0.25, 0.05, 0.35);
-            const tB = 0.10 + tieBoost;
-            const rem = 1 - tB;
-            vote = {B: rem*0.51, P: rem*0.49, T: tB};
-            tieW = 1.5 + stability;
-        } else if (freq > 12) {
-            vote = {B:0.43, P:0.42, T:0.15};
-        }
-
-        const s = vote.B+vote.P+vote.T;
-        return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:tieW,
-            meta:{gapScore, stability, avgGap, freq} };
-    }
-    if (freq > 12) vote = {B:0.43, P:0.42, T:0.15};
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:tieW, meta:{freq} };
-}
-
-// M10: MEAN REVERSION
-function m10_meanRevert(arr) {
-    const cnt = {B:0,P:0,T:0};
-    for (const c of arr) if (cnt[c]!==undefined) cnt[c]++;
+// M07: PHÂN TÍCH CÂN BẰNG B/P
+function m07_balanceAnalysis(arr) {
+    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    
+    const cnt = { B: 0, P: 0, T: 0 };
+    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
     const N = arr.length;
-    const bPct = cnt.B/N*100, pPct = cnt.P/N*100;
-    const bDev = bPct - 45.86, pDev = pPct - 44.62;
-
-    let vote = {B:0.46, P:0.44, T:0.10};
-    const maxDev = Math.max(Math.abs(bDev), Math.abs(pDev));
-    const str = clamp(maxDev/25, 0, 0.28);
-
-    if (bDev > 5)       vote = {B:0.46-str, P:0.44+str, T:0.10};
-    else if (pDev > 5)  vote = {B:0.46+str, P:0.44-str, T:0.10};
-
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.3,
-        meta:{bDev:Math.round(bDev*10)/10, pDev:Math.round(pDev*10)/10} };
-}
-
-// M11: REGIME CLASSIFIER
-function m11_regime(arr) {
-    const r20 = arr.slice(-20);
-    let sw = 0;
-    for (let i=1; i<r20.length; i++) {
-        if (r20[i]!==r20[i-1] && r20[i]!=='T' && r20[i-1]!=='T') sw++;
+    
+    const bPct = cnt.B / N * 100;
+    const pPct = cnt.P / N * 100;
+    const diff = bPct - pPct;
+    
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    
+    // Nếu B đang nhiều hơn P quá nhiều -> khả năng P về để cân bằng
+    if (diff > 10) {
+        const boost = clamp(diff / 40, 0.05, 0.20);
+        vote.P = 0.44 + boost;
+        vote.B = 0.46 - boost * 0.7;
+        vote.T = 0.10 - boost * 0.3;
     }
-    const swRate = sw/(r20.length-1||1);
-    const lastNT = [...arr].reverse().find(c=>c!=='T')||'B';
-    const regime = swRate>0.62?'CHOP' : swRate<0.33?'STREAK' : 'MIXED';
-    const str = clamp(Math.abs(swRate-0.5)*1.8, 0, 0.30);
-
-    let vote = {B:0.46, P:0.44, T:0.10};
-    if (regime==='CHOP') {
-        if (lastNT==='B') vote = {B:0.46-str, P:0.44+str, T:0.10};
-        else              vote = {B:0.46+str, P:0.44-str, T:0.10};
-    } else if (regime==='STREAK') {
-        if (lastNT==='B') vote = {B:0.46+str, P:0.44-str, T:0.10};
-        else              vote = {B:0.46-str, P:0.44+str, T:0.10};
+    // Nếu P đang nhiều hơn B quá nhiều -> khả năng B về để cân bằng
+    else if (diff < -10) {
+        const boost = clamp(Math.abs(diff) / 40, 0.05, 0.20);
+        vote.B = 0.46 + boost;
+        vote.P = 0.44 - boost * 0.7;
+        vote.T = 0.10 - boost * 0.3;
     }
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.7,
-        meta:{regime, swRate:Math.round(swRate*100)} };
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.5,
+        meta: { diff: Math.round(diff*10)/10 }
+    };
 }
 
-// M12: AUTOCORRELATION
-function m12_acf(arr) {
-    const vals = arr.map(c=>c==='B'?1:c==='P'?-1:0);
-    const mu = mean(vals);
-    const dv = vals.map(v=>v-mu);
-    const den = sum(dv.map(d=>d*d))||1;
-    const acf1 = sum(dv.slice(0,-1).map((d,i)=>d*dv[i+1]))/den;
-    const acf2 = dv.length>2 ? sum(dv.slice(0,-2).map((d,i)=>d*dv[i+2]))/den : 0;
-    const acfBlend = acf1*0.7 + acf2*0.3;
-
-    const lastNT = [...arr].reverse().find(c=>c!=='T')||'B';
-    const str = clamp(Math.abs(acfBlend)*1.5, 0, 0.28);
-
-    let vote = {B:0.46, P:0.44, T:0.10};
-    if (acfBlend > 0.08) {
-        if (lastNT==='B') vote = {B:0.46+str, P:0.44-str, T:0.10};
-        else              vote = {B:0.46-str, P:0.44+str, T:0.10};
-    } else if (acfBlend < -0.08) {
-        if (lastNT==='B') vote = {B:0.46-str, P:0.44+str, T:0.10};
-        else              vote = {B:0.46+str, P:0.44-str, T:0.10};
+// M08: PHÂN TÍCH XU HƯỚNG GẦN NHẤT (NHƯNG KHÔNG BÁM MÙ)
+function m08_recentTrend(arr) {
+    if (arr.length < 10) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    
+    const recent = arr.slice(-10);
+    const cnt = { B: 0, P: 0, T: 0 };
+    for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
+    
+    // Nếu 10 ván gần nhất có 1 cửa quá áp đảo -> khả năng cửa kia về
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    
+    if (cnt.B >= 7) {
+        vote.B = 0.40;
+        vote.P = 0.50;
+        vote.T = 0.10;
+    } else if (cnt.P >= 7) {
+        vote.B = 0.50;
+        vote.P = 0.40;
+        vote.T = 0.10;
+    } else if (cnt.B <= 2 && cnt.P <= 2 && cnt.T >= 6) {
+        vote.T = 0.12;
+        vote.B = 0.44;
+        vote.P = 0.44;
     }
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.3,
-        meta:{acf1:Math.round(acf1*100)/100, acf2:Math.round(acf2*100)/100} };
-}
-
-// M13: HOT/COLD
-function m13_hotcold(arr) {
-    if (arr.length < 15) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.5 };
-    const r15 = arr.slice(-15);
-    const fullB = arr.filter(c=>c==='B').length/arr.length;
-    const fullP = arr.filter(c=>c==='P').length/arr.length;
-    const recB  = r15.filter(c=>c==='B').length/r15.length;
-    const recP  = r15.filter(c=>c==='P').length/r15.length;
-    const bHot  = recB - fullB;
-    const pHot  = recP - fullP;
-    const maxHot = Math.max(Math.abs(bHot), Math.abs(pHot));
-    const str   = clamp(maxHot*2.5, 0, 0.28);
-
-    let vote = {B:0.46, P:0.44, T:0.10};
-    if (bHot > 0.10)      vote = {B:0.46-str, P:0.44+str, T:0.10};
-    else if (pHot > 0.10) vote = {B:0.46+str, P:0.44-str, T:0.10};
-
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.2,
-        meta:{bHot:Math.round(bHot*100), pHot:Math.round(pHot*100)} };
-}
-
-// M14: PATTERN COMPLETION
-function m14_patComp(arr) {
-    if (arr.length < 14) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
-    const searchIn = arr.slice(0,-6);
-    const recent = arr.slice(-6);
-    let best = { match:false, predicted:null, conf:0, samples:0 };
-
-    for (let plen = 5; plen >= 3; plen--) {
-        const partial = recent.slice(0, plen).join('');
-        const haystack = searchIn.join('');
-        const votes = {B:0,P:0,T:0};
-        let idx = 0;
-        while (true) {
-            const found = haystack.indexOf(partial, idx);
-            if (found === -1) break;
-            const nextIdx = found + plen;
-            if (nextIdx < searchIn.length) {
-                const next = searchIn[nextIdx];
-                if (votes[next] !== undefined) votes[next]++;
-            }
-            idx = found + 1;
-        }
-        const total = votes.B + votes.P + votes.T;
-        if (total >= 3) {
-            best = {
-                match: true,
-                predicted: Object.entries(votes).sort((a,b)=>b[1]-a[1])[0][0],
-                conf: clamp(Math.max(votes.B,votes.P,votes.T)/total, 0.3, 0.85),
-                samples: total,
-                vote: {B:votes.B/total, P:votes.P/total, T:votes.T/total}
-            };
-            break;
-        }
-    }
-
-    if (!best.match) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    const w = clamp(best.samples/10 * best.conf * 2.5, 0.5, 2.5);
-    return { vote: best.vote, weight: w, meta:{ conf:Math.round(best.conf*100), samples:best.samples } };
-}
-
-// M15: VOLATILITY ADAPTIVE
-function m15_volatility(arr) {
-    const w = arr.slice(-20);
-    let ch = 0;
-    for (let i=1; i<w.length; i++) if(w[i]!==w[i-1]) ch++;
-    const vol = ch/(w.length-1||1);
-
-    const freq = m01_bayesFreq(arr);
-    const volFactor = clamp(vol, 0, 1);
-
-    if (vol > 0.65) return { vote: freq.vote, weight: 1.5 * volFactor };
-    return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3, meta:{vol:Math.round(vol*100)} };
-}
-
-// M16: ENTROPY
-function m16_entropy(arr) {
-    const cnt = {B:0,P:0,T:0};
-    for (const c of arr) if(cnt[c]!==undefined) cnt[c]++;
-    const N = arr.length;
-    let H = 0;
-    for (const k of ['B','P','T']) {
-        const p = cnt[k]/N;
-        if (p>0) H -= p*Math.log2(p);
-    }
-    const pred = 1 - H/Math.log2(3);
-    const dom = cnt.B > cnt.P ? 'B' : 'P';
-    const str = clamp(pred*0.25, 0, 0.20);
-    let vote = {B:0.46,P:0.44,T:0.10};
-    if (pred > 0.4) {
-        if (dom==='B') vote={B:0.46+str,P:0.44-str,T:0.10};
-        else           vote={B:0.46-str,P:0.44+str,T:0.10};
-    }
-    const s = vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s,P:vote.P/s,T:vote.T/s}, weight:0.9,
-        meta:{entropy:Math.round(H*10)/10, predictability:Math.round(pred*100)} };
-}
-
-// M17: RECENCY DECAY
-function m17_recencyDecay(arr) {
-    const decay = 0.88;
-    let wB=0, wP=0, wT=0, totalW=0;
-    for (let i=0; i<arr.length; i++) {
-        const w = Math.pow(decay, arr.length-1-i);
-        if (arr[i]==='B') wB+=w;
-        else if (arr[i]==='P') wP+=w;
-        else wT+=w;
-        totalW+=w;
-    }
-    const vote = {B:wB/totalW, P:wP/totalW, T:wT/totalW};
-    return { vote, weight:1.4 };
-}
-
-// M18: HOUSE EDGE BASELINE
-function m18_houseEdge(arr) {
-    return { vote:{B:0.4586,P:0.4462,T:0.0952}, weight:0.8 };
-}
-
-// M19: SESSION FATIGUE
-function m19_fatigue(tableId) {
-    const hist = predHistory[tableId]||[];
-    if (hist.length < 6) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    const last6 = hist.slice(-6);
-    const bRun = last6.filter(p=>p==='B').length;
-    const pRun = last6.filter(p=>p==='P').length;
-    let vote = {B:0.46,P:0.44,T:0.10};
-    if (bRun>=5) vote={B:0.36,P:0.54,T:0.10};
-    else if (bRun>=4) vote={B:0.40,P:0.50,T:0.10};
-    else if (pRun>=5) vote={B:0.54,P:0.36,T:0.10};
-    else if (pRun>=4) vote={B:0.50,P:0.40,T:0.10};
-    const s=vote.B+vote.P+vote.T;
-    return { vote:{B:vote.B/s,P:vote.P/s,T:vote.T/s}, weight:0.9 };
-}
-
-// M20: CLUSTER ANALYSIS
-function m20_cluster(arr) {
-    if (arr.length < 20) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
-    const tail = arr.slice(-5).join('');
-    const windows = [];
-    for (let i=0; i<=arr.length-6; i++) {
-        const w = arr.slice(i,i+5).join('');
-        let dist = 0;
-        for (let j=0; j<5; j++) if(tail[j]!==w[j]) dist++;
-        windows.push({ dist, next: arr[i+5] });
-    }
-    windows.sort((a,b)=>a.dist-b.dist);
-    const top = windows.slice(0,8);
-    const votes={B:0,P:0,T:0};
-    for (const t of top) {
-        const w = 1/(t.dist+1);
-        if(votes[t.next]!==undefined) votes[t.next]+=w;
-    }
-    const s=votes.B+votes.P+votes.T||1;
-    return { vote:{B:votes.B/s,P:votes.P/s,T:votes.T/s}, weight:1.8 };
+    
+    const s = vote.B + vote.P + vote.T;
+    return { 
+        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
+        weight: 1.3,
+        meta: { recentB: cnt.B, recentP: cnt.P, recentT: cnt.T }
+    };
 }
 
 // ============================================================
-// MASTER PREDICTOR - FIX: CHỈ DỰ ĐOÁN KHI TỈ LỆ >= 58%
+// MASTER PREDICTOR - KHÔNG CHẠY THEO CẦU
 // ============================================================
 function predictVIP(history, tableId = 'UNKNOWN') {
     const DEFAULT = {
@@ -513,22 +394,16 @@ function predictVIP(history, tableId = 'UNKNOWN') {
     const arr = toArr(history);
     if (arr.length < 10) return DEFAULT;
 
-    // ── PHÂN TÍCH ĐỘC LẬP CHO MỖI BÀN ──
-    // Lấy riêng dữ liệu của bàn này
-    const tableHistory = arr;
-    
-    // Run all 20 modules trên chính dữ liệu của bàn đó
+    // ── CHẠY CÁC MODULE PHÂN TÍCH ──
     const modules = [
-        m01_bayesFreq(tableHistory), m02_streak(tableHistory), 
-        m03_zigzag(tableHistory), m04_patterns(tableHistory),
-        m05_markov(tableHistory), m06_markov3(tableHistory), 
-        m07_momentum(tableHistory), m08_windows(tableHistory),
-        m09_tie(tableHistory), m10_meanRevert(tableHistory), 
-        m11_regime(tableHistory), m12_acf(tableHistory),
-        m13_hotcold(tableHistory), m14_patComp(tableHistory), 
-        m15_volatility(tableHistory), m16_entropy(tableHistory),
-        m17_recencyDecay(tableHistory), m18_houseEdge(tableHistory), 
-        m19_fatigue(tableId), m20_cluster(tableHistory)
+        m01_realFrequency(arr),
+        m02_coldAnalysis(arr),
+        m03_zigzagAnalysis(arr),
+        m04_patternAnalysis(arr),
+        m05_volatilityAnalysis(arr),
+        m06_tieCycle(arr),
+        m07_balanceAnalysis(arr),
+        m08_recentTrend(arr),
     ];
 
     // ── WEIGHTED ENSEMBLE ──
@@ -540,6 +415,7 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         sumT += m.vote.T * m.weight;
         totalW += m.weight;
     }
+    
     let rB = (sumB / totalW) * 100;
     let rP = (sumP / totalW) * 100;
     let rT = (sumT / totalW) * 100;
@@ -550,7 +426,7 @@ function predictVIP(history, tableId = 'UNKNOWN') {
     rP = (rP / rawSum) * 100;
     rT = (rT / rawSum) * 100;
 
-    // ── TÍNH CONFIDENCE ──
+    // ── CONFIDENCE ──
     const avgOthersB = (rP + rT) / 2;
     const avgOthersP = (rB + rT) / 2;
     const avgOthersT = (rB + rP) / 2;
@@ -558,33 +434,24 @@ function predictVIP(history, tableId = 'UNKNOWN') {
     const confP = clamp(50 + (rP - avgOthersP) * 2.5, 40, 95);
     const confT = clamp(50 + (rT - avgOthersT) * 2.5, 35, 90);
 
-    // ── CHỈ DỰ ĐOÁN KHI CONFIDENCE >= 58% ──
-    // VÀ CHÊNH LỆCH TỐI THIỂU 8% GIỮA CÁC CỬA
+    // ── TÌM CỬA TỐT NHẤT ──
     const sides = [
         { name: 'Banker', rate: Math.round(rB), conf: Math.round(confB) },
         { name: 'Player', rate: Math.round(rP), conf: Math.round(confP) },
         { name: 'Tie', rate: Math.round(rT), conf: Math.round(confT) }
     ];
     
-    // Sắp xếp theo confidence giảm dần
     sides.sort((a, b) => b.conf - a.conf);
     const best = sides[0];
     const second = sides[1];
     
-    // KIỂM TRA ĐIỀU KIỆN DỰ ĐOÁN:
-    // 1. Confidence >= 58%
-    // 2. Chênh lệch với cửa thứ 2 >= 8%
+    // ── ĐIỀU KIỆN DỰ ĐOÁN ──
     let canPredict = false;
     let finalRecommend = 'Chờ';
     let finalRate = 0;
     let finalConf = 0;
     
     if (best.conf >= 58 && (best.conf - second.conf) >= 8) {
-        canPredict = true;
-        finalRecommend = best.name;
-        finalRate = best.rate;
-        finalConf = best.conf;
-    } else if (best.conf >= 65 && (best.conf - second.conf) >= 5) {
         canPredict = true;
         finalRecommend = best.name;
         finalRate = best.rate;
@@ -598,30 +465,30 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         return '⏳ CHỜ';
     }
 
-    // ── PATTERN DETECTION ──
-    const reg = m11_regime(tableHistory);
-    const stk = m02_streak(tableHistory);
-    const ptt = m04_patterns(tableHistory);
-    const tieM = m09_tie(tableHistory);
-    const zzM = m03_zigzag(tableHistory);
-    const pcM = m14_patComp(tableHistory);
+    // ── PATTERN ──
+    const freq = m01_realFrequency(arr);
+    const cold = m02_coldAnalysis(arr);
+    const zz = m03_zigzagAnalysis(arr);
+    const pat = m04_patternAnalysis(arr);
+    const tie = m06_tieCycle(arr);
+    const bal = m07_balanceAnalysis(arr);
 
     let pattern = 'Cầu đan xen';
-    if (tieM.meta?.gapScore >= 0.85 && tieM.meta?.freq > 8) {
-        pattern = `🔮 TIE SIGNAL — Gap=${Math.round(tieM.meta?.avgGap||0)}, Freq=${Math.round(tieM.meta?.freq||0)}%, Score=${Math.round((tieM.meta?.gapScore||0)*100)}%`;
-    } else if (reg.meta?.regime === 'CHOP') {
-        pattern = `⚡ Chop Regime (${reg.meta?.swRate}% switches)`;
-    } else if (reg.meta?.regime === 'STREAK') {
-        pattern = `🔥 Streak Regime — ${stk.meta?.streak} (cont=${Math.round((stk.meta?.contP||0)*100)}%)`;
-    } else if (ptt.meta?.pattern !== 'NONE') {
-        pattern = `📐 Pattern ${ptt.meta?.pattern}`;
-    } else if (zzM.meta?.zzScore > 0.55) {
-        pattern = `↔️ Zigzag Score=${Math.round((zzM.meta?.zzScore||0)*100)}%`;
-    } else if (pcM.meta?.conf > 0) {
-        pattern = `🔍 Sequence Match (conf=${pcM.meta?.conf}%, n=${pcM.meta?.samples})`;
+    if (cold.meta?.count < 5 && cold.meta?.count > 0) {
+        pattern = `❄️ Cửa ${cold.meta.cold} đang nguội (${cold.meta.count}/20) -> khả năng về`;
+    } else if (zz.meta?.mode === 'CHOP') {
+        pattern = `🔄 Chop Mode (${zz.meta.switchRate}% đảo chiều)`;
+    } else if (pat.meta?.pattern !== 'NONE') {
+        pattern = `📐 Pattern ${pat.meta.pattern}`;
+    } else if (tie.meta?.gapRatio > 1.2 && tie.meta?.gapRatio < 3) {
+        pattern = `🔮 Tie sắp về (gap=${tie.meta.avgGap})`;
+    } else if (Math.abs(bal.meta?.diff || 0) > 10) {
+        pattern = `⚖️ Cân bằng B/P (chênh ${Math.round(bal.meta.diff)}%)`;
+    } else {
+        pattern = `📊 Phân tích đa chiều`;
     }
 
-    // ── ROUND TỈ LỆ ──
+    // ── ROUND ──
     let b = Math.round(rB), p = Math.round(rP), t = Math.round(rT);
     const rs = b + p + t;
     if (rs !== 100) {
@@ -670,20 +537,24 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         cau_goc: history,
         stats: {
             B: b, P: p, T: t,
-            regime: reg.meta?.regime,
-            streak: stk.meta?.streak,
-            acf: m12_acf(tableHistory).meta?.acf1,
-            momentum: m07_momentum(tableHistory).meta?.ewm,
-            meanRevertB: m10_meanRevert(tableHistory).meta?.bDev,
-            meanRevertP: m10_meanRevert(tableHistory).meta?.pDev,
-            entropy: m16_entropy(tableHistory).meta?.entropy,
-            predictability: m16_entropy(tableHistory).meta?.predictability,
-            hotB: m13_hotcold(tableHistory).meta?.bHot,
-            hotP: m13_hotcold(tableHistory).meta?.pHot,
-            pattern: ptt.meta?.pattern,
-            tieFreq: Math.round(tieM.meta?.freq || 0),
+            realB: freq.meta?.realB,
+            realP: freq.meta?.realP,
+            realT: freq.meta?.realT,
+            devB: freq.meta?.devB,
+            devP: freq.meta?.devP,
+            cold: cold.meta?.cold,
+            coldCount: cold.meta?.count,
+            mode: zz.meta?.mode,
+            switchRate: zz.meta?.switchRate,
+            pattern: pat.meta?.pattern,
+            tieGap: tie.meta?.avgGap,
+            gapRatio: tie.meta?.gapRatio,
+            balance: bal.meta?.diff,
+            recentB: m08_recentTrend(arr).meta?.recentB,
+            recentP: m08_recentTrend(arr).meta?.recentP,
+            recentT: m08_recentTrend(arr).meta?.recentT,
             diff: Math.round(best.conf - second.conf),
-            modules: 20
+            modules: 8
         }
     };
 }
@@ -710,10 +581,7 @@ app.get('/api/predict/:tableId', async (req, res) => {
         const tableId = req.params.tableId.toUpperCase();
         const cauGoc = await fetchTableData(tableId);
         if (!cauGoc) {
-            return res.json({ 
-                success: false, 
-                message: `Không tìm thấy bàn ${tableId}` 
-            });
+            return res.json({ success: false, message: `Không tìm thấy bàn ${tableId}` });
         }
 
         const old = lastData[tableId] || '';
@@ -724,33 +592,36 @@ app.get('/api/predict/:tableId', async (req, res) => {
 
         const r = predictVIP(cauGoc, tableId);
 
-        // ── JSON GỌN ──
         const result = {
             phiên: sessionData[tableId],
             cầu_gốc: cauGoc,
             Dự_đoán: r.recommend,
             Tỉ_lệ: r.canPredict ? `${r.recommendRate}%` : 'Chờ',
             Độ_tin_cậy: r.canPredict ? `${r.recommendConf}%` : 'Chờ',
-            Dự_đoán_Tie: r.tie.prediction,
-            Tỉ_lệ_tie: `${r.tie.rate}%`,
-            Cầu: r.pattern,
             BANKER: `${r.banker.rate}% (${r.banker.signal})`,
             PLAYER: `${r.player.rate}% (${r.player.signal})`,
             TIE: `${r.tie.rate}% (${r.tie.signal})`,
+            Cầu: r.pattern,
             chênh_lệch: r.canPredict ? `${r.stats.diff}%` : 'Chưa đủ',
-            trạng_thái: r.canPredict ? '✅ CÓ DỰ ĐOÁN' : '⏳ CHỜ THÊM DỮ LIỆU'
+            trạng_thái: r.canPredict ? '✅ CÓ DỰ ĐOÁN' : '⏳ CHỜ THÊM',
+            phân_tích: {
+                'Tỉ lệ thực tế': `B=${r.stats.realB}% P=${r.stats.realP}% T=${r.stats.realT}%`,
+                'Độ lệch chuẩn': `B=${r.stats.devB}% P=${r.stats.devP}%`,
+                'Cửa nguội': r.stats.cold ? `${r.stats.cold} (${r.stats.coldCount}/20)` : 'Không',
+                'Chế độ': r.stats.mode || 'MIXED',
+                'Pattern': r.stats.pattern || 'Không',
+                'Cân bằng B/P': r.stats.balance ? `${r.stats.balance}%` : 'Cân bằng',
+                '10 ván gần': `B=${r.stats.recentB} P=${r.stats.recentP} T=${r.stats.recentT}`
+            }
         };
 
         res.json(result);
     } catch (e) {
-        res.status(500).json({ 
-            success: false, 
-            error: e.message 
-        });
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// ── API: Dự đoán tất cả bàn ──
+// ── API: Dự đoán tất cả ──
 app.get('/api/predict/all', async (req, res) => {
     try {
         const tableIds = ['C01', 'C02', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10', 'C11', 'C15', 'C16', 'C17', 'C18', 'C19', 'C20'];
@@ -777,14 +648,14 @@ app.get('/api/predict/all', async (req, res) => {
                 BANKER: `${r.banker.rate}%`,
                 PLAYER: `${r.player.rate}%`, 
                 TIE: `${r.tie.rate}%`,
-                cầu: r.pattern,
+                Cầu: r.pattern,
                 trạng_thái: r.canPredict ? '✅' : '⏳'
             };
         }
 
         res.json({
             success: true,
-            engine: 'VIP-v16.0.0-FIXED',
+            engine: 'VIP-v18.0-NO-STREAK-FIX',
             timestamp: new Date().toISOString(),
             author: '@tranhoang2286',
             predictions
@@ -812,15 +683,18 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
 // ── Root ──
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT VIP ULTRA — FIXED v16.1',
-        version: '16.1.0',
+        name: 'BACCARAT VIP — NO STREAK FIX v18.0',
+        version: '18.0.0',
         author: '@tranhoang2286',
         features: [
-            '✅ Mỗi bàn phân tích độc lập',
+            '✅ KHÔNG chạy theo cầu mù quáng',
+            '✅ Phân tích tần suất thực tế từng cửa',
+            '✅ Phát hiện cửa đang nguội (thiếu)',
+            '✅ Phân tích zigzag (đảo chiều)',
+            '✅ Phân tích pattern thực tế',
+            '✅ Cân bằng B/P',
             '✅ Chỉ dự đoán khi confidence >= 58%',
-            '✅ Chênh lệch tối thiểu 8% với cửa thứ 2',
-            '✅ Nếu không đủ điều kiện -> trả về "Chờ"',
-            '✅ Tỉ lệ Banker/Player/Tie đầy đủ'
+            '✅ Chênh lệch tối thiểu 8%'
         ],
         endpoints: {
             'Dự đoán 1 bàn': '/api/predict/:tableId',
@@ -832,13 +706,14 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('══════════════════════════════════════════════');
-    console.log('🃏 BACCARAT VIP ULTRA — FIXED v16.1');
+    console.log('🃏 BACCARAT VIP — NO STREAK FIX v18.0');
     console.log('══════════════════════════════════════════════');
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log('✅ FIX: Mỗi bàn phân tích độc lập');
-    console.log('✅ FIX: Chỉ dự đoán khi confidence >= 58%');
-    console.log('✅ FIX: Chênh lệch tối thiểu 8%');
-    console.log('✅ FIX: Không đủ điều kiện -> trả "Chờ"');
+    console.log('✅ KHÔNG chạy theo cầu mù quáng');
+    console.log('✅ Phân tích tần suất thực tế');
+    console.log('✅ Phát hiện cửa đang nguội');
+    console.log('✅ Phân tích zigzag & pattern');
+    console.log('✅ Cân bằng B/P');
     console.log(`👤 @tranhoang2286`);
     console.log('══════════════════════════════════════════════');
 });
