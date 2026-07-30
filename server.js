@@ -57,21 +57,8 @@ function tinhDoLech(arr) {
     };
 }
 
-function tinhXacSuat(arr, target) {
-    const cnt = {B:0, P:0, T:0};
-    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
-    const total = arr.length || 1;
-    return cnt[target] / total * 100;
-}
-
-function tinhDoTinCay(conf, samples) {
-    // Càng nhiều mẫu, độ tin cậy càng cao
-    const sampleBoost = Math.min(samples / 20, 10);
-    return Math.min(conf + sampleBoost, 95);
-}
-
 // ============================================================
-= THUẬT TOÁN HỌC MÁY - PHÂN TÍCH CẦU THÔNG MINH
+// THUẬT TOÁN HỌC MÁY - PHÂN TÍCH CẦU THÔNG MINH
 // ============================================================
 
 // Học từ lịch sử các bàn khác
@@ -591,7 +578,7 @@ function CT30_332(arr) {
 }
 
 // ============================================================
-= THUẬT TOÁN HỌC MÁY - DỰ ĐOÁN THÔNG MINH
+// THUẬT TOÁN HỌC MÁY - DỰ ĐOÁN THÔNG MINH
 // ============================================================
 function duDoanThongMinh(history, tableId) {
     const arr = toArr(history);
@@ -615,7 +602,7 @@ function duDoanThongMinh(history, tableId) {
     });
     if (learningData[tableId].length > 100) learningData[tableId].shift();
     
-    // ── BƯỚC 1: CHẠY 30 CÔNG THỨC ──
+    // BƯỚC 1: CHẠY 30 CÔNG THỨC
     const results = [];
     const formulas = [
         CT01_Zigzag, CT02_222, CT03_22Dao, CT04_33, CT05_121,
@@ -633,13 +620,13 @@ function duDoanThongMinh(history, tableId) {
         }
     }
     
-    // ── BƯỚC 2: HỌC TỪ LỊCH SỬ ──
+    // BƯỚC 2: HỌC TỪ LỊCH SỬ
     const patterns = hocPattern(arr);
     const markov = hocMarkov(arr);
     const streak = hocStreak(arr);
     const crossData = hocCrossTable(tableId);
     
-    // ── BƯỚC 3: TỔNG HỢP THUẬT TOÁN HỌC ──
+    // BƯỚC 3: TỔNG HỢP THUẬT TOÁN HỌC
     let scoreB = 0, scoreP = 0, scoreT = 0;
     let weightB = 0, weightP = 0, weightT = 0;
     
@@ -661,17 +648,14 @@ function duDoanThongMinh(history, tableId) {
     }
     
     // 3.3: Từ Streak
-    const streakData = hocStreak(arr);
     const currentStreak = tinhRuns(arr);
     const lastRun = currentStreak[currentStreak.length - 1];
     if (lastRun) {
-        const avgStreak = streakData[lastRun.c]?.avg || 2;
+        const avgStreak = streak[lastRun.c]?.avg || 2;
         if (lastRun.n >= avgStreak * 1.5) {
-            // Streak dài -> đảo
             if (lastRun.c === 'B') { scoreP += 15; weightP += 1.5; }
             else if (lastRun.c === 'P') { scoreB += 15; weightB += 1.5; }
         } else {
-            // Tiếp tục
             if (lastRun.c === 'B') { scoreB += 10; weightB += 1; }
             else if (lastRun.c === 'P') { scoreP += 10; weightP += 1; }
         }
@@ -701,23 +685,23 @@ function duDoanThongMinh(history, tableId) {
         }
     }
     
-    // ── BƯỚC 4: TÍNH ĐIỂM TRUNG BÌNH ──
+    // BƯỚC 4: TÍNH ĐIỂM TRUNG BÌNH
     let avgB = weightB > 0 ? scoreB / weightB : 50;
     let avgP = weightP > 0 ? scoreP / weightP : 50;
     let avgT = weightT > 0 ? scoreT / weightT : 50;
     
-    // ── BƯỚC 5: CHUẨN HÓA ──
+    // BƯỚC 5: CHUẨN HÓA
     const total = avgB + avgP + avgT;
     avgB = avgB / total * 100;
     avgP = avgP / total * 100;
     avgT = avgT / total * 100;
     
-    // ── BƯỚC 6: TÍNH CONFIDENCE ──
+    // BƯỚC 6: TÍNH CONFIDENCE
     const confB = Math.min(50 + (avgB - 33) * 1.5, 95);
     const confP = Math.min(50 + (avgP - 33) * 1.5, 95);
     const confT = Math.min(50 + (avgT - 33) * 1.5, 90);
     
-    // ── BƯỚC 7: CHỌN DỰ ĐOÁN ──
+    // BƯỚC 7: CHỌN DỰ ĐOÁN
     const sides = [
         {name: 'BANKER', rate: Math.round(avgB), conf: Math.round(confB)},
         {name: 'PLAYER', rate: Math.round(avgP), conf: Math.round(confP)},
@@ -727,21 +711,21 @@ function duDoanThongMinh(history, tableId) {
     const best = sides[0];
     const second = sides[1];
     
-    // ── BƯỚC 8: XÁC ĐỊNH LOẠI CẦU ──
+    // BƯỚC 8: XÁC ĐỊNH LOẠI CẦU
     let name = 'KHÔNG XÁC ĐỊNH';
     if (results.length > 0) {
         results.sort((a,b) => a.priority - b.priority || b.conf - a.conf);
         name = results[0].name;
     }
     
-    // ── BƯỚC 9: TOP 3 CÔNG THỨC ──
+    // BƯỚC 9: TOP 3 CÔNG THỨC
     const top3 = results.slice(0, 3).map(r => ({
         name: r.name,
         conf: r.conf,
         predict: r.predict
     }));
     
-    // ── BƯỚC 10: THÔNG TIN HỌC ──
+    // BƯỚC 10: THÔNG TIN HỌC
     const hocTu = `Đã học ${learningData[tableId]?.length || 0} ván`;
     const crossInfo = crossData.total > 0 ? ` + ${crossData.total} ván cross` : '';
     
@@ -888,18 +872,18 @@ app.get('/', (req, res) => {
         author: '@tranhoang2286',
         tong_cong_thuc: 30,
         thuat_toan: [
-            '✅ HỌC MÁY TỪ LỊCH SỬ',
-            '✅ HỌC PATTERN TỰ ĐỘNG',
-            '✅ HỌC MARKOV CHAIN',
-            '✅ HỌC STREAK CHU KỲ',
-            '✅ HỌC CROSS-TABLE',
-            '✅ 30 CÔNG THỨC CHUẨN'
+            'HỌC MÁY TỪ LỊCH SỬ',
+            'HỌC PATTERN TỰ ĐỘNG',
+            'HỌC MARKOV CHAIN',
+            'HỌC STREAK CHU KỲ',
+            'HỌC CROSS-TABLE',
+            '30 CÔNG THỨC CHUẨN'
         ],
         features: [
-            '✅ KHÔNG RANDOM',
-            '✅ TỰ HỌC THÔNG MINH',
-            '✅ DỰ ĐOÁN CHÍNH XÁC',
-            '✅ PHÂN TÍCH ĐA CHIỀU'
+            'KHÔNG RANDOM',
+            'TỰ HỌC THÔNG MINH',
+            'DỰ ĐOÁN CHÍNH XÁC',
+            'PHÂN TÍCH ĐA CHIỀU'
         ],
         endpoints: {
             'Dự đoán 1 bàn': '/api/predict/:tableId',
