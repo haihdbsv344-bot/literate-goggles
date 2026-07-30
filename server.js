@@ -12,566 +12,691 @@ app.use((req, res, next) => {
 const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
-const predictionHistory = {};
+const predHistory = {};
+const resultHistory = {}; // actual results for accuracy tracking
 
-function toArray(str) {
+// ============================================================
+// UTILS
+// ============================================================
+function toArr(str) {
     return str ? str.split('').filter(c => ['B','P','T'].includes(c)) : [];
 }
-
-function clamp(v, lo, hi) {
-    return Math.max(lo, Math.min(hi, v));
-}
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
+function mean(arr) { return arr.length ? sum(arr) / arr.length : 0; }
 
 // ============================================================
-// 16 METHODS (giữ nguyên logic, chỉ fix scoring)
+// CORE ENGINE — 20 INDEPENDENT ANALYSIS MODULES
 // ============================================================
 
-function analyzeFrequency(arr) {
+// M01: BAYESIAN FREQUENCY
+function m01_bayesFreq(arr) {
     const prior = { B: 45.86, P: 44.62, T: 9.52 };
-    const counts = { B: 0, P: 0, T: 0 };
-    for (const c of arr) if (counts[c] !== undefined) counts[c]++;
-    const total = arr.length;
-    const alpha = 20;
+    const cnt = { B: 0, P: 0, T: 0 };
+    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
+    const N = arr.length, a = 30;
     const post = {};
-    for (const k of ['B','P','T']) {
-        post[k] = (counts[k] + (prior[k] / 100) * alpha) / (total + alpha) * 100;
-    }
-    return { post, counts, pct: { B: (counts.B/total)*100, P: (counts.P/total)*100, T: (counts.T/total)*100 } };
+    for (const k of ['B','P','T'])
+        post[k] = (cnt[k] + (prior[k]/100)*a) / (N + a);
+    return { vote: post, weight: 1.2 };
 }
 
-function analyzeStreak(arr) {
-    const streaks = [];
-    let cur = { char: arr[0], len: 1 };
-    for (let i = 1; i < arr.length; i++) {
-        if (arr[i] === cur.char) cur.len++;
-        else { streaks.push({...cur}); cur = { char: arr[i], len: 1 }; }
-    }
-    streaks.push({...cur});
-    const last = streaks[streaks.length - 1];
-    const secondLast = streaks[streaks.length - 2] || null;
-    const avgB = streaks.filter(s=>s.char==='B').reduce((a,s)=>a+s.len,0) / (streaks.filter(s=>s.char==='B').length||1);
-    const avgP = streaks.filter(s=>s.char==='P').reduce((a,s)=>a+s.len,0) / (streaks.filter(s=>s.char==='P').length||1);
-    return { last, secondLast, streaks, avgB, avgP };
-}
-
-function analyzeZigzag(arr) {
-    function countZZ(a) {
-        let zz = 0;
-        for (let i = 1; i < a.length - 1; i++) {
-            if (a[i]!=='T' && a[i-1]!=='T' && a[i+1]!=='T' && a[i]!==a[i-1] && a[i]!==a[i+1]) zz++;
-        }
-        return zz;
-    }
-    const window10 = arr.slice(-10);
-    return { zz10: countZZ(window10), zzFull: countZZ(arr), isZZ: countZZ(window10) >= 3 };
-}
-
-function analyzePatterns(arr) {
+// M02: STREAK DYNAMICS
+function m02_streak(arr) {
     const runs = [];
-    let cur = { char: arr[0], len: 1 };
+    let cur = { c: arr[0], n: 1 };
     for (let i = 1; i < arr.length; i++) {
-        if (arr[i] === cur.char) cur.len++;
-        else { runs.push({...cur}); cur = { char: arr[i], len: 1 }; }
+        if (arr[i] === cur.c) cur.n++;
+        else { runs.push({...cur}); cur = { c: arr[i], n: 1 }; }
     }
     runs.push({...cur});
-    const rLen = runs.map(r=>r.len);
-    const rChar = runs.map(r=>r.char);
-    const n = rLen.length;
-    const is22 = n>=2 && rLen[n-1]===2 && rLen[n-2]===2 && rChar[n-1]!==rChar[n-2];
-    const is33 = n>=2 && rLen[n-1]===3 && rLen[n-2]===3;
-    const is121 = n>=3 && rLen[n-3]===1 && rLen[n-2]===2 && rLen[n-1]===1;
-    const is212 = n>=3 && rLen[n-3]===2 && rLen[n-2]===1 && rLen[n-1]===2;
-    return { is22, is33, is121, is212, runs, lastRun: runs[n-1], prevRun: runs[n-2]||null };
+    const last = runs[runs.length - 1];
+
+    // Empirical continuation prob per streak length (baccarat stats)
+    const contTable = { 1: 0.507, 2: 0.487, 3: 0.461, 4: 0.432, 5: 0.398 };
+    const contP = contTable[Math.min(last.n, 5)] || 0.38;
+    const revP  = (1 - contP) * 0.97;
+    const tieP  = (1 - contP) * 0.03;
+
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    if (last.c === 'B') { vote = { B: contP, P: revP, T: tieP }; }
+    else if (last.c === 'P') { vote = { B: revP, P: contP, T: tieP }; }
+    else { vote = { B: 0.46, P: 0.44, T: 0.10 }; }
+
+    return { vote, weight: 2.0, meta: { streak: `${last.c}x${last.n}`, contP } };
 }
 
-function analyzeMarkov(arr) {
+// M03: ZIGZAG WINDOWED
+function m03_zigzag(arr) {
+    function zzRate(a) {
+        let zz = 0;
+        for (let i = 1; i < a.length - 1; i++) {
+            if (a[i] !== 'T' && a[i-1] !== 'T' && a[i+1] !== 'T'
+                && a[i] !== a[i-1] && a[i] !== a[i+1]) zz++;
+        }
+        return zz / (a.length - 2 || 1);
+    }
+    const zz10 = zzRate(arr.slice(-10));
+    const zz20 = zzRate(arr.slice(-20));
+    const zzScore = zz10 * 0.7 + zz20 * 0.3;
+    const lastNT = [...arr].reverse().find(c => c !== 'T') || 'B';
+
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+    if (zzScore > 0.55) {
+        const flipStr = zzScore * 0.5;
+        if (lastNT === 'B') vote = { B: 0.46 - flipStr, P: 0.44 + flipStr, T: 0.10 };
+        else                vote = { B: 0.46 + flipStr, P: 0.44 - flipStr, T: 0.10 };
+    }
+    const s = vote.B + vote.P + vote.T;
+    return { vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, weight: 1.6, meta: { zzScore } };
+}
+
+// M04: MULTI-PATTERN (2-2, 3-3, 1-2-1, 2-1-2, 1-1-1-1)
+function m04_patterns(arr) {
+    const runs = [];
+    let cur = { c: arr[0], n: 1 };
+    for (let i = 1; i < arr.length; i++) {
+        if (arr[i] === cur.c) cur.n++;
+        else { runs.push({...cur}); cur = { c: arr[i], n: 1 }; }
+    }
+    runs.push({...cur});
+    const R = runs;
+    const L = R.length;
+    const rn = R.map(r => r.n);
+    const rc = R.map(r => r.c);
+
+    let matchedPatt = 'NONE';
+    let vote = { B: 0.46, P: 0.44, T: 0.10 };
+
+    // Pattern 2-2-2: last 3 runs all length 2
+    if (L >= 3 && rn[L-1]===2 && rn[L-2]===2 && rn[L-3]===2) {
+        matchedPatt = '2-2-2';
+        // Continue 2-2 cadence → same as prev-prev char
+        const target = rc[L-3];
+        if (target==='B') vote = { B: 0.72, P: 0.24, T: 0.04 };
+        else              vote = { B: 0.24, P: 0.72, T: 0.04 };
+    }
+    // Pattern 2-2: last 2 runs length 2, different chars
+    else if (L >= 2 && rn[L-1]===2 && rn[L-2]===2 && rc[L-1]!==rc[L-2]) {
+        matchedPatt = '2-2';
+        const target = rc[L-2];
+        if (target==='B') vote = { B: 0.68, P: 0.28, T: 0.04 };
+        else              vote = { B: 0.28, P: 0.68, T: 0.04 };
+    }
+    // Pattern 3-3
+    else if (L >= 2 && rn[L-1]===3 && rn[L-2]===3) {
+        matchedPatt = '3-3';
+        const brk = rc[L-1]==='B' ? 'P' : 'B';
+        if (brk==='B') vote = { B: 0.70, P: 0.26, T: 0.04 };
+        else           vote = { B: 0.26, P: 0.70, T: 0.04 };
+    }
+    // Pattern 1-2-1
+    else if (L >= 3 && rn[L-3]===1 && rn[L-2]===2 && rn[L-1]===1) {
+        matchedPatt = '1-2-1';
+        // Usually → next is a 2 of same char as middle
+        const target = rc[L-2];
+        if (target==='B') vote = { B: 0.65, P: 0.31, T: 0.04 };
+        else              vote = { B: 0.31, P: 0.65, T: 0.04 };
+    }
+    // Pattern 2-1-2
+    else if (L >= 3 && rn[L-3]===2 && rn[L-2]===1 && rn[L-1]===2) {
+        matchedPatt = '2-1-2';
+        // Usually → single card next (flip)
+        const flip = rc[L-1]==='B' ? 'P' : 'B';
+        if (flip==='B') vote = { B: 0.63, P: 0.33, T: 0.04 };
+        else            vote = { B: 0.33, P: 0.63, T: 0.04 };
+    }
+    // Chop 1-1-1-1-1 (5+ singles)
+    else if (L >= 5 && rn.slice(-5).every(n => n===1)) {
+        matchedPatt = 'CHOP5';
+        const lastC = rc[L-1];
+        if (lastC==='B') vote = { B: 0.25, P: 0.68, T: 0.07 };
+        else             vote = { B: 0.68, P: 0.25, T: 0.07 };
+    }
+
+    const s = vote.B + vote.P + vote.T;
+    return { vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, weight: 1.8, meta: { pattern: matchedPatt } };
+}
+
+// M05: MARKOV CHAIN ORDER 1+2 BLENDED
+function m05_markov(arr) {
+    // Order-1
     const m1 = { B:{B:0,P:0,T:0}, P:{B:0,P:0,T:0}, T:{B:0,P:0,T:0} };
-    for (let i = 0; i < arr.length-1; i++) {
+    for (let i = 0; i < arr.length - 1; i++) {
         if (m1[arr[i]]) m1[arr[i]][arr[i+1]]++;
     }
+    // Order-2
     const m2 = {};
-    for (let i = 0; i < arr.length-2; i++) {
-        const key = arr[i]+arr[i+1];
-        if (!m2[key]) m2[key] = {B:0,P:0,T:0};
-        m2[key][arr[i+2]]++;
+    for (let i = 0; i < arr.length - 2; i++) {
+        const k = arr[i]+arr[i+1];
+        if (!m2[k]) m2[k] = {B:0,P:0,T:0};
+        m2[k][arr[i+2]]++;
     }
-    function bestOf(trans) {
-        const total = Object.values(trans).reduce((a,b)=>a+b,0);
-        if (!total) return { pred:'B', prob:0 };
-        let best='B', bestP=0;
-        for (const [k,v] of Object.entries(trans)) {
-            if (v/total > bestP) { bestP=v/total; best=k; }
-        }
-        return { pred:best, prob:bestP };
+    function normalize(obj) {
+        const t = sum(Object.values(obj));
+        if (!t) return {B:0.46,P:0.44,T:0.10};
+        return {B:obj.B/t, P:obj.P/t, T:obj.T/t};
     }
     const last1 = arr[arr.length-1];
     const last2 = arr.slice(-2).join('');
-    const o1 = bestOf(m1[last1]||{B:1,P:1,T:0});
-    const o2 = m2[last2] ? bestOf(m2[last2]) : {pred:'B',prob:0};
-    const pred = (arr.length > 30 && o2.prob > 0.35) ? o2 : o1;
-    return { o1, o2, pred };
+    const v1 = normalize(m1[last1]||{B:1,P:1,T:0});
+    const v2 = m2[last2] ? normalize(m2[last2]) : v1;
+
+    // Blend: more weight to order-2 if dataset large enough
+    const w2 = arr.length > 40 ? 0.65 : 0.35;
+    const vote = {
+        B: v1.B*(1-w2) + v2.B*w2,
+        P: v1.P*(1-w2) + v2.P*w2,
+        T: v1.T*(1-w2) + v2.T*w2,
+    };
+    const s = vote.B+vote.P+vote.T;
+    return { vote: {B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight: 2.2 };
 }
 
-function analyzeMomentum(arr) {
-    const values = arr.map(c => c==='B'?1 : c==='P'?-1 : 0);
-    const alpha = 0.3;
-    let ewm = values[0]||0;
-    for (let i=1; i<values.length; i++) ewm = alpha*values[i] + (1-alpha)*ewm;
-    return { ewm, trend: ewm>0.15?'B' : ewm<-0.15?'P' : 'NEUTRAL' };
-}
-
-function analyzeEntropy(arr) {
-    const counts = {B:0,P:0,T:0};
-    for (const c of arr) if (counts[c]!==undefined) counts[c]++;
-    const total = arr.length;
-    let entropy = 0;
-    for (const c of ['B','P','T']) {
-        const p = counts[c]/total;
-        if (p>0) entropy -= p*Math.log2(p);
+// M06: ORDER-3 MARKOV
+function m06_markov3(arr) {
+    if (arr.length < 10) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
+    const m3 = {};
+    for (let i = 0; i < arr.length - 3; i++) {
+        const k = arr[i]+arr[i+1]+arr[i+2];
+        if (!m3[k]) m3[k] = {B:0,P:0,T:0};
+        m3[k][arr[i+3]]++;
     }
-    return { entropy, predictability: 1 - (entropy/Math.log2(3)) };
+    const last3 = arr.slice(-3).join('');
+    const trans = m3[last3];
+    if (!trans) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    const t = sum(Object.values(trans));
+    if (!t) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    const vote = {B:trans.B/t, P:trans.P/t, T:trans.T/t};
+    // Trust order-3 more when it has enough samples
+    const confidence = clamp(t / 5, 0.2, 1.0);
+    return { vote, weight: 2.0 * confidence };
 }
 
-function analyzeWindows(arr) {
-    function cw(n) {
+// M07: EWM MOMENTUM
+function m07_momentum(arr) {
+    const vals = arr.map(c => c==='B'?1 : c==='P'?-1 : 0);
+    let ewm = vals[0]||0;
+    const alpha = 0.25;
+    for (let i = 1; i < vals.length; i++) ewm = alpha*vals[i] + (1-alpha)*ewm;
+
+    let vote = {B:0.46, P:0.44, T:0.10};
+    const str = clamp(Math.abs(ewm)*1.5, 0, 0.30);
+    if (ewm > 0.12)       vote = {B:0.46+str, P:0.44-str, T:0.10};
+    else if (ewm < -0.12) vote = {B:0.46-str, P:0.44+str, T:0.10};
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.4, meta:{ewm} };
+}
+
+// M08: MULTI-WINDOW RECENCY
+function m08_windows(arr) {
+    function wv(n) {
         const w = arr.slice(-n);
-        return { B:w.filter(c=>c==='B').length, P:w.filter(c=>c==='P').length, T:w.filter(c=>c==='T').length, len:w.length };
+        const t = w.length||1;
+        return {B:w.filter(c=>c==='B').length/t, P:w.filter(c=>c==='P').length/t, T:w.filter(c=>c==='T').length/t};
     }
-    return { w5:cw(5), w10:cw(10), w20:cw(20) };
+    const w3=wv(3), w7=wv(7), w15=wv(15), w30=wv(30);
+    const vote = {
+        B: w3.B*0.40 + w7.B*0.30 + w15.B*0.20 + w30.B*0.10,
+        P: w3.P*0.40 + w7.P*0.30 + w15.P*0.20 + w30.P*0.10,
+        T: w3.T*0.40 + w7.T*0.30 + w15.T*0.20 + w30.T*0.10,
+    };
+    const s = vote.B+vote.P+vote.T||1;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.6 };
 }
 
-function analyzeTie(arr) {
-    const tiePos = arr.reduce((acc,c,i)=>{ if(c==='T') acc.push(i); return acc; },[]);
-    if (tiePos.length < 2) return { signal:false, freq:(tiePos.length/arr.length)*100, avgGap:Infinity, gapScore:0, lastGap:0 };
-    const gaps = [];
-    for (let i=1; i<tiePos.length; i++) gaps.push(tiePos[i]-tiePos[i-1]);
-    const avgGap = gaps.reduce((a,b)=>a+b,0)/gaps.length;
-    const lastGap = arr.length-1-tiePos[tiePos.length-1];
-    const freq = (tiePos.length/arr.length)*100;
-    const gapScore = clamp(lastGap/avgGap, 0, 3);
-    const signal = (gapScore>=0.85 && freq>7) || freq>13;
-    return { signal, freq, avgGap, lastGap, gapScore };
-}
+// M09: TIE CYCLE DETECTOR (ENHANCED)
+function m09_tie(arr) {
+    const tp = arr.reduce((a,c,i)=>{ if(c==='T') a.push(i); return a; },[]);
+    const freq = (tp.length/arr.length)*100;
+    let vote = {B:0.46, P:0.44, T:0.10};
+    let tieW = 1.0;
 
-function analyzeMeanReversion(arr) {
-    const freq = analyzeFrequency(arr);
-    const pct = freq.pct;
-    const bDev = pct.B - 45.86;
-    const pDev = pct.P - 44.62;
-    return { bDev, pDev, revertTo: bDev>8?'P' : pDev>8?'B' : 'NEUTRAL', strength: Math.max(Math.abs(bDev), Math.abs(pDev)) };
-}
+    if (tp.length >= 3) {
+        const gaps = [];
+        for (let i=1; i<tp.length; i++) gaps.push(tp[i]-tp[i-1]);
+        const avgGap = mean(gaps);
+        const stdGap = Math.sqrt(mean(gaps.map(g=>(g-avgGap)**2)));
+        const lastGap = arr.length-1-tp[tp.length-1];
+        const gapScore = lastGap/avgGap;
+        const stability = 1 - clamp(stdGap/avgGap, 0, 1); // how regular is tie cycle
 
-function analyzeRegime(arr) {
-    const recent = arr.slice(-20);
-    let switches = 0;
-    for (let i=1; i<recent.length; i++) {
-        if (recent[i]!==recent[i-1] && recent[i]!=='T' && recent[i-1]!=='T') switches++;
+        if (gapScore >= 0.8 && stability > 0.4 && freq > 6) {
+            const tieBoost = clamp(gapScore * stability * 0.25, 0.05, 0.35);
+            const tB = 0.10 + tieBoost;
+            const rem = 1 - tB;
+            vote = {B: rem*0.51, P: rem*0.49, T: tB};
+            tieW = 1.5 + stability;
+        } else if (freq > 12) {
+            vote = {B:0.43, P:0.42, T:0.15};
+        }
+
+        const s = vote.B+vote.P+vote.T;
+        return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:tieW,
+            meta:{gapScore, stability, avgGap, freq} };
     }
-    const switchRate = switches/(recent.length-1||1);
-    return { switchRate, regime: switchRate>0.6?'CHOP' : switchRate<0.35?'STREAK' : 'MIXED' };
+    if (freq > 12) vote = {B:0.43, P:0.42, T:0.15};
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:tieW, meta:{freq} };
 }
 
-function analyzeAutoCorr(arr) {
+// M10: MEAN REVERSION (STATISTICAL)
+function m10_meanRevert(arr) {
+    const cnt = {B:0,P:0,T:0};
+    for (const c of arr) if (cnt[c]!==undefined) cnt[c]++;
+    const N = arr.length;
+    const bPct = cnt.B/N*100, pPct = cnt.P/N*100;
+    const bDev = bPct - 45.86, pDev = pPct - 44.62;
+
+    let vote = {B:0.46, P:0.44, T:0.10};
+    const maxDev = Math.max(Math.abs(bDev), Math.abs(pDev));
+    const str = clamp(maxDev/25, 0, 0.28);
+
+    if (bDev > 5)       vote = {B:0.46-str, P:0.44+str, T:0.10};
+    else if (pDev > 5)  vote = {B:0.46+str, P:0.44-str, T:0.10};
+
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.3,
+        meta:{bDev:Math.round(bDev*10)/10, pDev:Math.round(pDev*10)/10} };
+}
+
+// M11: REGIME CLASSIFIER (CHOP / STREAK / MIXED)
+function m11_regime(arr) {
+    const r20 = arr.slice(-20);
+    let sw = 0;
+    for (let i=1; i<r20.length; i++) {
+        if (r20[i]!==r20[i-1] && r20[i]!=='T' && r20[i-1]!=='T') sw++;
+    }
+    const swRate = sw/(r20.length-1||1);
+    const lastNT = [...arr].reverse().find(c=>c!=='T')||'B';
+    const regime = swRate>0.62?'CHOP' : swRate<0.33?'STREAK' : 'MIXED';
+    const str = clamp(Math.abs(swRate-0.5)*1.8, 0, 0.30);
+
+    let vote = {B:0.46, P:0.44, T:0.10};
+    if (regime==='CHOP') {
+        if (lastNT==='B') vote = {B:0.46-str, P:0.44+str, T:0.10};
+        else              vote = {B:0.46+str, P:0.44-str, T:0.10};
+    } else if (regime==='STREAK') {
+        if (lastNT==='B') vote = {B:0.46+str, P:0.44-str, T:0.10};
+        else              vote = {B:0.46-str, P:0.44+str, T:0.10};
+    }
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.7,
+        meta:{regime, swRate:Math.round(swRate*100)} };
+}
+
+// M12: AUTOCORRELATION (LAG 1+2)
+function m12_acf(arr) {
     const vals = arr.map(c=>c==='B'?1:c==='P'?-1:0);
-    const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
-    let num=0, den=0;
-    for (let i=0; i<vals.length-1; i++) num += (vals[i]-mean)*(vals[i+1]-mean);
-    for (let i=0; i<vals.length; i++) den += (vals[i]-mean)**2;
-    const acf = den===0?0:num/den;
-    return { acf, type: acf>0.1?'TREND' : acf<-0.1?'REVERT' : 'RANDOM' };
+    const mu = mean(vals);
+    const dv = vals.map(v=>v-mu);
+    const den = sum(dv.map(d=>d*d))||1;
+    const acf1 = sum(dv.slice(0,-1).map((d,i)=>d*dv[i+1]))/den;
+    const acf2 = dv.length>2 ? sum(dv.slice(0,-2).map((d,i)=>d*dv[i+2]))/den : 0;
+    const acfBlend = acf1*0.7 + acf2*0.3;
+
+    const lastNT = [...arr].reverse().find(c=>c!=='T')||'B';
+    const str = clamp(Math.abs(acfBlend)*1.5, 0, 0.28);
+
+    let vote = {B:0.46, P:0.44, T:0.10};
+    if (acfBlend > 0.08) {
+        // Trending
+        if (lastNT==='B') vote = {B:0.46+str, P:0.44-str, T:0.10};
+        else              vote = {B:0.46-str, P:0.44+str, T:0.10};
+    } else if (acfBlend < -0.08) {
+        // Reverting
+        if (lastNT==='B') vote = {B:0.46-str, P:0.44+str, T:0.10};
+        else              vote = {B:0.46+str, P:0.44-str, T:0.10};
+    }
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.3,
+        meta:{acf1:Math.round(acf1*100)/100, acf2:Math.round(acf2*100)/100} };
 }
 
-function analyzeSessionFatigue(tableId) {
-    if (!predictionHistory[tableId]) predictionHistory[tableId] = [];
-    const hist = predictionHistory[tableId];
-    if (hist.length < 5) return { boost: {B:0,P:0,T:0} };
-    const r = hist.slice(-5);
-    const bC = r.filter(p=>p==='B').length;
-    const pC = r.filter(p=>p==='P').length;
-    const boost = {B:0,P:0,T:0};
-    if (bC>=4) boost.P += 6;
-    else if (pC>=4) boost.B += 6;
-    return { boost };
-}
-
-function analyzeHotCold(arr) {
-    const recent = arr.slice(-15);
-    const rcB = recent.filter(c=>c==='B').length/recent.length;
+// M13: HOT/COLD COOLDOWN
+function m13_hotcold(arr) {
+    if (arr.length < 15) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.5 };
+    const r15 = arr.slice(-15);
     const fullB = arr.filter(c=>c==='B').length/arr.length;
-    const rcP = recent.filter(c=>c==='P').length/recent.length;
     const fullP = arr.filter(c=>c==='P').length/arr.length;
-    const bHot = rcB - fullB;
-    const pHot = rcP - fullP;
-    return { bHot, pHot, coolDown: bHot>0.15?'P' : pHot>0.15?'B' : 'NEUTRAL' };
+    const recB  = r15.filter(c=>c==='B').length/r15.length;
+    const recP  = r15.filter(c=>c==='P').length/r15.length;
+    const bHot  = recB - fullB;
+    const pHot  = recP - fullP;
+    const maxHot = Math.max(Math.abs(bHot), Math.abs(pHot));
+    const str   = clamp(maxHot*2.5, 0, 0.28);
+
+    let vote = {B:0.46, P:0.44, T:0.10};
+    if (bHot > 0.10)      vote = {B:0.46-str, P:0.44+str, T:0.10}; // B hot → cool → P
+    else if (pHot > 0.10) vote = {B:0.46+str, P:0.44-str, T:0.10};
+
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s, P:vote.P/s, T:vote.T/s}, weight:1.2,
+        meta:{bHot:Math.round(bHot*100), pHot:Math.round(pHot*100)} };
 }
 
-function analyzePatternCompletion(arr) {
-    if (arr.length < 12) return { match:false, predicted:null, confidence:0 };
-    const recent6 = arr.slice(-6).join('');
-    const searchIn = arr.slice(0,-6).join('');
-    for (let partial=5; partial>=3; partial--) {
-        const partialSeq = recent6.substring(0, partial);
-        const idx = searchIn.lastIndexOf(partialSeq);
-        if (idx !== -1 && idx+partial < arr.length-6) {
-            return { match:true, predicted:arr[idx+partial], confidence:partial/6 };
+// M14: PATTERN COMPLETION (SEQUENCE MATCH)
+function m14_patComp(arr) {
+    if (arr.length < 14) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
+    const searchIn = arr.slice(0,-6);
+    const recent = arr.slice(-6);
+    let best = { match:false, predicted:null, conf:0, samples:0 };
+
+    // Try partial lengths 5 → 3
+    for (let plen = 5; plen >= 3; plen--) {
+        const partial = recent.slice(0, plen).join('');
+        const haystack = searchIn.join('');
+        const votes = {B:0,P:0,T:0};
+        let idx = 0;
+        while (true) {
+            const found = haystack.indexOf(partial, idx);
+            if (found === -1) break;
+            const nextIdx = found + plen;
+            if (nextIdx < searchIn.length) {
+                const next = searchIn[nextIdx];
+                if (votes[next] !== undefined) votes[next]++;
+            }
+            idx = found + 1;
+        }
+        const total = votes.B + votes.P + votes.T;
+        if (total >= 3) {
+            best = {
+                match: true,
+                predicted: Object.entries(votes).sort((a,b)=>b[1]-a[1])[0][0],
+                conf: clamp(Math.max(votes.B,votes.P,votes.T)/total, 0.3, 0.85),
+                samples: total,
+                vote: {B:votes.B/total, P:votes.P/total, T:votes.T/total}
+            };
+            break;
         }
     }
-    return { match:false, predicted:null, confidence:0 };
+
+    if (!best.match) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    const w = clamp(best.samples/10 * best.conf * 2.5, 0.5, 2.5);
+    return { vote: best.vote, weight: w, meta:{ conf:Math.round(best.conf*100), samples:best.samples } };
 }
 
-function analyzeVolatility(arr) {
-    const window = arr.slice(-20);
-    let changes = 0;
-    for (let i=1; i<window.length; i++) {
-        if (window[i]!==window[i-1]) changes++;
+// M15: VOLATILITY ADAPTIVE
+function m15_volatility(arr, otherVotes) {
+    const w = arr.slice(-20);
+    let ch = 0;
+    for (let i=1; i<w.length; i++) if(w[i]!==w[i-1]) ch++;
+    const vol = ch/(w.length-1||1);
+
+    // High vol → trust frequency more → blend all votes toward freq
+    const freq = m01_bayesFreq(arr);
+    const volFactor = clamp(vol, 0, 1);
+
+    // When volatile, amplify frequency signal
+    if (vol > 0.65) return { vote: freq.vote, weight: 1.5 * volFactor };
+    return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3, meta:{vol:Math.round(vol*100)} };
+}
+
+// M16: ENTROPY SIGNAL
+function m16_entropy(arr) {
+    const cnt = {B:0,P:0,T:0};
+    for (const c of arr) if(cnt[c]!==undefined) cnt[c]++;
+    const N = arr.length;
+    let H = 0;
+    for (const k of ['B','P','T']) {
+        const p = cnt[k]/N;
+        if (p>0) H -= p*Math.log2(p);
     }
-    const vol = changes/(window.length-1||1);
-    return { vol, isHigh:vol>0.65, isLow:vol<0.35 };
+    const pred = 1 - H/Math.log2(3);
+    // Low entropy = predictable = trust the dominant side
+    const dom = cnt.B > cnt.P ? 'B' : 'P';
+    const str = clamp(pred*0.25, 0, 0.20);
+    let vote = {B:0.46,P:0.44,T:0.10};
+    if (pred > 0.4) {
+        if (dom==='B') vote={B:0.46+str,P:0.44-str,T:0.10};
+        else           vote={B:0.46-str,P:0.44+str,T:0.10};
+    }
+    const s = vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s,P:vote.P/s,T:vote.T/s}, weight:0.9,
+        meta:{entropy:Math.round(H*10)/10, predictability:Math.round(pred*100)} };
+}
+
+// M17: RECENCY DECAY VOTE
+function m17_recencyDecay(arr) {
+    // Each card contributes a vote weighted by recency (exponential decay)
+    const decay = 0.88;
+    let wB=0, wP=0, wT=0, totalW=0;
+    for (let i=0; i<arr.length; i++) {
+        const w = Math.pow(decay, arr.length-1-i);
+        if (arr[i]==='B') wB+=w;
+        else if (arr[i]==='P') wP+=w;
+        else wT+=w;
+        totalW+=w;
+    }
+    const vote = {B:wB/totalW, P:wP/totalW, T:wT/totalW};
+    return { vote, weight:1.4 };
+}
+
+// M18: ANTI-GAMBLER-FALLACY CORRECTION
+// Banker always has slight house edge in baccarat — inject baseline
+function m18_houseEdge(arr) {
+    // Pure theory: B=45.86%, P=44.62%, T=9.52% before commission
+    return { vote:{B:0.4586,P:0.4462,T:0.0952}, weight:0.8 };
+}
+
+// M19: SESSION FATIGUE (PREDICTION BIAS CORRECTION)
+function m19_fatigue(tableId) {
+    const hist = predHistory[tableId]||[];
+    if (hist.length < 6) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0.3 };
+    const last6 = hist.slice(-6);
+    const bRun = last6.filter(p=>p==='B').length;
+    const pRun = last6.filter(p=>p==='P').length;
+    let vote = {B:0.46,P:0.44,T:0.10};
+    if (bRun>=5) vote={B:0.36,P:0.54,T:0.10}; // strong correction
+    else if (bRun>=4) vote={B:0.40,P:0.50,T:0.10};
+    else if (pRun>=5) vote={B:0.54,P:0.36,T:0.10};
+    else if (pRun>=4) vote={B:0.50,P:0.40,T:0.10};
+    const s=vote.B+vote.P+vote.T;
+    return { vote:{B:vote.B/s,P:vote.P/s,T:vote.T/s}, weight:0.9 };
+}
+
+// M20: CLUSTER ANALYSIS (GROUP SIMILAR SEQUENCES)
+function m20_cluster(arr) {
+    if (arr.length < 20) return { vote:{B:0.46,P:0.44,T:0.10}, weight:0 };
+    // Sliding window of 5, find most similar cluster to current tail
+    const tail = arr.slice(-5).join('');
+    const windows = [];
+    for (let i=0; i<=arr.length-6; i++) {
+        const w = arr.slice(i,i+5).join('');
+        let dist = 0;
+        for (let j=0; j<5; j++) if(tail[j]!==w[j]) dist++;
+        windows.push({ dist, next: arr[i+5] });
+    }
+    windows.sort((a,b)=>a.dist-b.dist);
+    const top = windows.slice(0,8); // 8 nearest
+    const votes={B:0,P:0,T:0};
+    for (const t of top) {
+        const w = 1/(t.dist+1);
+        if(votes[t.next]!==undefined) votes[t.next]+=w;
+    }
+    const s=votes.B+votes.P+votes.T||1;
+    return { vote:{B:votes.B/s,P:votes.P/s,T:votes.T/s}, weight:1.8 };
 }
 
 // ============================================================
-// ENSEMBLE PREDICTOR — FIXED SCORING
+// MASTER PREDICTOR — FULL B/P/T SEPARATE
 // ============================================================
-function predictBCR(history, tableId='UNKNOWN') {
-    if (!history || history.length < 3) {
-        return {
-            prediction:'Player', bankerRate:46, playerRate:46, tieRate:8,
-            pattern:'Chưa đủ dữ liệu', cau_goc:history||'',
-            confidence:50, stats:{B:0,P:0,T:0}
-        };
+function predictVIP(history, tableId='UNKNOWN') {
+    const DEFAULT = {
+        banker:  { prediction:'Banker',  rate:46, confidence:50, signal:'NEUTRAL' },
+        player:  { prediction:'Player',  rate:44, confidence:50, signal:'NEUTRAL' },
+        tie:     { prediction:'Tie',     rate:10, confidence:50, signal:'NEUTRAL' },
+        recommend: 'Player',
+        recommendRate: 44,
+        recommendConf: 50,
+        pattern: 'Chưa đủ dữ liệu',
+        cau_goc: history||'',
+        stats: {}
+    };
+
+    if (!history || history.length < 5) return DEFAULT;
+    const arr = toArr(history);
+    if (arr.length < 5) return DEFAULT;
+
+    // ── RUN ALL 20 MODULES ──
+    const modules = [
+        m01_bayesFreq(arr),
+        m02_streak(arr),
+        m03_zigzag(arr),
+        m04_patterns(arr),
+        m05_markov(arr),
+        m06_markov3(arr),
+        m07_momentum(arr),
+        m08_windows(arr),
+        m09_tie(arr),
+        m10_meanRevert(arr),
+        m11_regime(arr),
+        m12_acf(arr),
+        m13_hotcold(arr),
+        m14_patComp(arr),
+        m15_volatility(arr),
+        m16_entropy(arr),
+        m17_recencyDecay(arr),
+        m18_houseEdge(arr),
+        m19_fatigue(tableId),
+        m20_cluster(arr),
+    ];
+
+    // ── WEIGHTED ENSEMBLE ──
+    let totalW=0, sumB=0, sumP=0, sumT=0;
+    for (const m of modules) {
+        if (!m || m.weight <= 0) continue;
+        sumB += m.vote.B * m.weight;
+        sumP += m.vote.P * m.weight;
+        sumT += m.vote.T * m.weight;
+        totalW += m.weight;
     }
+    let rB = (sumB/totalW)*100;
+    let rP = (sumP/totalW)*100;
+    let rT = (sumT/totalW)*100;
 
-    const arr = toArray(history);
-    if (arr.length < 3) {
-        return {
-            prediction:'Player', bankerRate:46, playerRate:46, tieRate:8,
-            pattern:'Chưa đủ dữ liệu', cau_goc:history||'',
-            confidence:50, stats:{B:0,P:0,T:0}
-        };
+    // ── SOFT FLOOR (not clamp) ──
+    rB = Math.max(rB, 8);
+    rP = Math.max(rP, 8);
+    rT = Math.max(rT, 3);
+    const rawSum = rB+rP+rT;
+    rB = rB/rawSum*100;
+    rP = rP/rawSum*100;
+    rT = rT/rawSum*100;
+
+    // ── CONFIDENCE PER SIDE ──
+    // Confidence = how much THIS side dominates vs the avg of the other two
+    const avgOthersB = (rP+rT)/2;
+    const avgOthersP = (rB+rT)/2;
+    const avgOthersT = (rB+rP)/2;
+    const confB = clamp(50 + (rB - avgOthersB)*1.8, 48, 92);
+    const confP = clamp(50 + (rP - avgOthersP)*1.8, 48, 92);
+    const confT = clamp(50 + (rT - avgOthersT)*1.8, 40, 85);
+
+    // ── SIGNAL STRENGTH ──
+    function signal(rate, conf) {
+        if (conf >= 78) return 'STRONG';
+        if (conf >= 65) return 'MEDIUM';
+        return 'WEAK';
     }
-
-    const freq    = analyzeFrequency(arr);
-    const streak  = analyzeStreak(arr);
-    const zigzag  = analyzeZigzag(arr);
-    const patt    = analyzePatterns(arr);
-    const markov  = analyzeMarkov(arr);
-    const mom     = analyzeMomentum(arr);
-    const ent     = analyzeEntropy(arr);
-    const wins    = analyzeWindows(arr);
-    const tie     = analyzeTie(arr);
-    const mrev    = analyzeMeanReversion(arr);
-    const regime  = analyzeRegime(arr);
-    const acf     = analyzeAutoCorr(arr);
-    const fatigue = analyzeSessionFatigue(tableId);
-    const hotcold = analyzeHotCold(arr);
-    const patcomp = analyzePatternCompletion(arr);
-    const vol     = analyzeVolatility(arr);
-
-    // ── Score accumulator ──
-    // Format: setiap method ngủ contribute vote {B, P, T} dalam range 0–1
-    // Tao accumulate votes, lấy weighted average, KHÔNG clamp keras
-    const votes = [];
-
-    // FIX UTAMA: mỗi method đóng góp vote {b, p, t} + weight
-    // vote phải sum = 1 per method
-    // weight = importance của method
-
-    const lastNT = [...arr].reverse().find(c=>c!=='T') || 'B';
-
-    // 1. BAYESIAN FREQUENCY — weight 1.0
-    {
-        const tot = freq.post.B + freq.post.P + freq.post.T;
-        votes.push({ b:freq.post.B/tot, p:freq.post.P/tot, t:freq.post.T/tot, w:1.0 });
-    }
-
-    // 2. STREAK — weight 1.8
-    {
-        const sl = streak.last;
-        let b=0.46, p=0.44, t=0.10;
-        if (sl.char !== 'T') {
-            // Probability of continuing decreases with streak length
-            // Based on empirical baccarat: ~50% chance of continuation at len 1
-            // drops ~5% per additional card
-            const continueP = clamp(0.52 - (sl.len-1)*0.06, 0.25, 0.65);
-            const reverseP = 1 - continueP;
-            if (sl.char==='B') { b=continueP; p=reverseP; t=0.02; }
-            else               { p=continueP; b=reverseP; t=0.02; }
-            // normalize
-            const s = b+p+t; b/=s; p/=s; t/=s;
-        }
-        votes.push({ b, p, t, w:1.8 });
-    }
-
-    // 3. ZIGZAG — weight 1.4
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (zigzag.isZZ) {
-            // Chop → flip
-            if (lastNT==='B') { b=0.25; p=0.70; t=0.05; }
-            else              { b=0.70; p=0.25; t=0.05; }
-        }
-        votes.push({ b, p, t, w:1.4 });
-    }
-
-    // 4. PATTERNS — weight 1.6
-    {
-        let b=0.46, p=0.44, t=0.10;
-        const pLastChar = patt.lastRun?.char;
-        const pPrevChar = patt.prevRun?.char;
-        if (patt.is22 && pPrevChar) {
-            // 2-2: next pair matches prev char
-            if (pPrevChar==='B') { b=0.72; p=0.24; t=0.04; }
-            else                 { b=0.24; p=0.72; t=0.04; }
-        } else if (patt.is33 && pLastChar) {
-            // 3-3: break
-            if (pLastChar==='B') { b=0.26; p=0.70; t=0.04; }
-            else                 { b=0.70; p=0.26; t=0.04; }
-        } else if (patt.is121 && pLastChar) {
-            if (pLastChar==='B') { b=0.62; p=0.34; t=0.04; }
-            else                 { b=0.34; p=0.62; t=0.04; }
-        } else if (patt.is212 && pLastChar) {
-            if (pLastChar==='B') { b=0.60; p=0.36; t=0.04; }
-            else                 { b=0.36; p=0.60; t=0.04; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.6 });
-    }
-
-    // 5. MARKOV O1+O2 — weight 1.8
-    {
-        const mkP = markov.pred;
-        let b=0.46, p=0.44, t=0.10;
-        if (mkP.prob > 0.3) {
-            const conf = clamp(mkP.prob, 0.35, 0.75);
-            const rest = (1 - conf);
-            if (mkP.pred==='B') { b=conf; p=rest*0.85; t=rest*0.15; }
-            else if (mkP.pred==='P') { p=conf; b=rest*0.85; t=rest*0.15; }
-            else { t=conf; b=rest*0.85; p=rest*0.15; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.8 });
-    }
-
-    // 6. EWM MOMENTUM — weight 1.2
-    {
-        let b=0.46, p=0.44, t=0.10;
-        const strength = clamp(Math.abs(mom.ewm), 0, 1);
-        if (mom.trend==='B') { b=0.46+strength*0.18; p=0.44-strength*0.18; }
-        else if (mom.trend==='P') { p=0.44+strength*0.18; b=0.46-strength*0.18; }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.2 });
-    }
-
-    // 7. ENTROPY — weight 0.9
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (ent.predictability > 0.55) {
-            const dominant = freq.pct.B > freq.pct.P ? 'B' : 'P';
-            const boost = ent.predictability * 0.2;
-            if (dominant==='B') { b=0.46+boost; p=0.44-boost; }
-            else                { p=0.44+boost; b=0.46-boost; }
-        } else if (ent.predictability < 0.2) {
-            t=0.20; b=0.43; p=0.37;
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:0.9 });
-    }
-
-    // 8. MULTI-WINDOW — weight 1.5
-    {
-        const wB = (wins.w5.B/wins.w5.len)*0.5 + (wins.w10.B/wins.w10.len)*0.3 + (wins.w20.B/wins.w20.len)*0.2;
-        const wP = (wins.w5.P/wins.w5.len)*0.5 + (wins.w10.P/wins.w10.len)*0.3 + (wins.w20.P/wins.w20.len)*0.2;
-        const wT = (wins.w5.T/wins.w5.len)*0.5 + (wins.w10.T/wins.w10.len)*0.3 + (wins.w20.T/wins.w20.len)*0.2;
-        const s = wB+wP+wT||1;
-        votes.push({ b:wB/s, p:wP/s, t:wT/s, w:1.5 });
-    }
-
-    // 9. TIE SIGNAL — weight 1.2
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (tie.signal) {
-            const tieBoost = clamp(tie.gapScore * 0.15, 0.05, 0.30);
-            t = 0.10 + tieBoost;
-            const rem = 1 - t;
-            b = rem * 0.51; p = rem * 0.49;
-        }
-        votes.push({ b, p, t, w:1.2 });
-    }
-
-    // 10. MEAN REVERSION — weight 1.3
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (mrev.revertTo !== 'NEUTRAL') {
-            const strength = clamp(mrev.strength / 20, 0.05, 0.25);
-            if (mrev.revertTo==='B') { b=0.46+strength; p=0.44-strength; }
-            else                     { p=0.44+strength; b=0.46-strength; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.3 });
-    }
-
-    // 11. REGIME — weight 1.5
-    {
-        let b=0.46, p=0.44, t=0.10;
-        const str = clamp(Math.abs(regime.switchRate - 0.5) * 2, 0, 0.35);
-        if (regime.regime==='CHOP') {
-            if (lastNT==='B') { b=0.46-str*0.5; p=0.44+str*0.5; }
-            else              { p=0.44-str*0.5; b=0.46+str*0.5; }
-        } else if (regime.regime==='STREAK') {
-            if (lastNT==='B') { b=0.46+str*0.5; p=0.44-str*0.5; }
-            else              { p=0.44+str*0.5; b=0.46-str*0.5; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.5 });
-    }
-
-    // 12. AUTOCORRELATION — weight 1.1
-    {
-        let b=0.46, p=0.44, t=0.10;
-        const acfStr = clamp(Math.abs(acf.acf), 0, 0.8);
-        if (acf.type==='TREND') {
-            if (lastNT==='B') { b=0.46+acfStr*0.2; p=0.44-acfStr*0.2; }
-            else              { p=0.44+acfStr*0.2; b=0.46-acfStr*0.2; }
-        } else if (acf.type==='REVERT') {
-            if (lastNT==='B') { b=0.46-acfStr*0.2; p=0.44+acfStr*0.2; }
-            else              { p=0.44-acfStr*0.2; b=0.46+acfStr*0.2; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.1 });
-    }
-
-    // 13. SESSION FATIGUE — weight 0.7 (minor correction)
-    {
-        let b=0.46+fatigue.boost.B/100, p=0.44+fatigue.boost.P/100, t=0.10;
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:0.7 });
-    }
-
-    // 14. HOT/COLD — weight 1.1
-    {
-        let b=0.46, p=0.44, t=0.10;
-        const hcStr = clamp(Math.max(Math.abs(hotcold.bHot), Math.abs(hotcold.pHot)) * 2, 0, 0.28);
-        if (hotcold.coolDown==='B') { b=0.46+hcStr; p=0.44-hcStr; }
-        else if (hotcold.coolDown==='P') { p=0.44+hcStr; b=0.46-hcStr; }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.1 });
-    }
-
-    // 15. PATTERN COMPLETION — weight 1.4
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (patcomp.match && patcomp.predicted) {
-            const conf = clamp(patcomp.confidence, 0.3, 0.7);
-            const rest = 1 - conf;
-            if (patcomp.predicted==='B')      { b=conf; p=rest*0.85; t=rest*0.15; }
-            else if (patcomp.predicted==='P') { p=conf; b=rest*0.85; t=rest*0.15; }
-            else                              { t=conf; b=rest*0.52; p=rest*0.48; }
-        }
-        const s=b+p+t; votes.push({ b:b/s, p:p/s, t:t/s, w:1.4 });
-    }
-
-    // 16. VOLATILITY INDEX — weight 1.0
-    {
-        let b=0.46, p=0.44, t=0.10;
-        if (vol.isHigh) {
-            // High vol → trust frequency
-            const tot = freq.post.B+freq.post.P+freq.post.T;
-            b=freq.post.B/tot; p=freq.post.P/tot; t=freq.post.T/tot;
-        }
-        // Low vol: leave at baseline (patterns already captured)
-        votes.push({ b, p, t, w:1.0 });
-    }
-
-    // ── WEIGHTED AVERAGE ──
-    let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
-    for (const v of votes) {
-        sumB += v.b * v.w;
-        sumP += v.p * v.w;
-        sumT += v.t * v.w;
-        totalW += v.w;
-    }
-    let bRate = (sumB / totalW) * 100;
-    let pRate = (sumP / totalW) * 100;
-    let tRate = (sumT / totalW) * 100;
-
-    // ── SOFT NORMALIZATION (không clamp cứng) ──
-    // Chỉ đảm bảo sum = 100 và min reasonable
-    const rawSum = bRate + pRate + tRate;
-    bRate = (bRate / rawSum) * 100;
-    pRate = (pRate / rawSum) * 100;
-    tRate = (tRate / rawSum) * 100;
-
-    // Floor nhẹ thôi, không làm mất spread
-    bRate = Math.max(bRate, 5);
-    pRate = Math.max(pRate, 5);
-    tRate = Math.max(tRate, 3);
-
-    // Re-normalize after floor
-    const floorSum = bRate + pRate + tRate;
-    bRate = (bRate / floorSum) * 100;
-    pRate = (pRate / floorSum) * 100;
-    tRate = (tRate / floorSum) * 100;
-
-    // ── PREDICTION ──
-    let prediction;
-    if (tie.signal && tRate > 20 && tRate > Math.min(bRate, pRate) * 0.9) {
-        prediction = 'Tie';
-    } else if (bRate >= pRate) {
-        prediction = 'Banker';
-    } else {
-        prediction = 'Player';
-    }
-
-    // ── ROUND ──
-    let b = Math.round(bRate);
-    let p = Math.round(pRate);
-    let t = Math.round(tRate);
-    const rSum = b+p+t;
-    if (rSum !== 100) {
-        const diff = 100 - rSum;
-        if (b >= p && b >= t) b += diff;
-        else if (p >= b && p >= t) p += diff;
-        else t += diff;
-    }
-
-    // ── CONFIDENCE ──
-    // Confidence = độ chắc chắn = khoảng cách giữa bên dẫn đầu và bên thứ 2
-    const top = Math.max(b, p);
-    const second = [b, p, t].sort((a,b)=>b-a)[1];
-    const spread = top - second;
-    // Spread 5 = conf 55, spread 15 = conf 70, spread 25 = conf 85
-    let confidence = clamp(50 + spread * 1.5 + ent.predictability * 8, 50, 88);
-    if (patcomp.match) confidence = clamp(confidence + 3, 50, 88);
-    confidence = Math.round(confidence);
 
     // ── PATTERN LABEL ──
-    let pattern = 'Cầu đan xen';
-    if (prediction==='Tie' && tie.signal) {
-        pattern = `🔮 TIE SIGNAL! Gap=${Math.round(tie.avgGap||0)}, Freq=${Math.round(tie.freq)}%, Score=${Math.round(tie.gapScore*100)}%`;
-    } else if (regime.regime==='CHOP') {
-        pattern = `Chop Regime (${Math.round(regime.switchRate*100)}% switches) → Đảo chiều`;
-    } else if (regime.regime==='STREAK') {
-        pattern = `Streak Regime — ${streak.last.char}x${streak.last.len} → Tiếp tục`;
-    } else if (patt.is22) { pattern = `Cầu 2-2 đang hoạt động`; }
-    else if (patt.is33)   { pattern = `Cầu 3-3`; }
-    else if (patt.is121)  { pattern = `Cầu 1-2-1`; }
-    else if (patt.is212)  { pattern = `Cầu 2-1-2`; }
-    else if (zigzag.isZZ) { pattern = `Zigzag (10 ván: ${zigzag.zz10} lần đổi)`; }
-    else if (patcomp.match) { pattern = `Pattern Completion (conf=${Math.round(patcomp.confidence*100)}%)`; }
-    else if (mrev.revertTo!=='NEUTRAL') { pattern = `Mean Reversion → ${mrev.revertTo} (dev=${Math.round(mrev.strength)}%)`; }
-    else { pattern = `ACF:${acf.type} | Mom:${mom.trend} | Vol:${Math.round(vol.vol*100)}%`; }
+    const reg = m11_regime(arr);
+    const stk = m02_streak(arr);
+    const ptt = m04_patterns(arr);
+    const tieM = m09_tie(arr);
+    const zzM  = m03_zigzag(arr);
+    const pcM  = m14_patComp(arr);
 
-    // ── STORE SESSION ──
-    if (!predictionHistory[tableId]) predictionHistory[tableId] = [];
-    predictionHistory[tableId].push(prediction[0]);
-    if (predictionHistory[tableId].length > 20) predictionHistory[tableId].shift();
+    let pattern = 'Cầu đan xen';
+    if (tieM.meta?.gapScore >= 0.85) {
+        pattern = `🔮 TIE SIGNAL — Gap=${Math.round(tieM.meta?.avgGap||0)}, Freq=${Math.round(tieM.meta?.freq||0)}%, Score=${Math.round((tieM.meta?.gapScore||0)*100)}%`;
+    } else if (reg.meta?.regime==='CHOP') {
+        pattern = `⚡ Chop Regime (${reg.meta?.swRate}% switches)`;
+    } else if (reg.meta?.regime==='STREAK') {
+        pattern = `🔥 Streak Regime — ${stk.meta?.streak} (cont=${Math.round((stk.meta?.contP||0)*100)}%)`;
+    } else if (ptt.meta?.pattern !== 'NONE') {
+        pattern = `📐 Pattern ${ptt.meta?.pattern}`;
+    } else if (zzM.meta?.zzScore > 0.55) {
+        pattern = `↔️ Zigzag Score=${Math.round((zzM.meta?.zzScore||0)*100)}%`;
+    } else if (pcM.meta?.conf > 0) {
+        pattern = `🔍 Sequence Match (conf=${pcM.meta?.conf}%, n=${pcM.meta?.samples})`;
+    }
+
+    // ── RECOMMEND (highest confidence side) ──
+    const sides = [
+        { name:'Banker', rate:Math.round(rB), conf:Math.round(confB) },
+        { name:'Player', rate:Math.round(rP), conf:Math.round(confP) },
+        { name:'Tie',    rate:Math.round(rT), conf:Math.round(confT) },
+    ];
+    const best = sides.reduce((a,b)=>a.conf>b.conf?a:b);
+
+    // ── ROUND & SUM=100 ──
+    let b=Math.round(rB), p=Math.round(rP), t=Math.round(rT);
+    const rs = b+p+t;
+    if (rs!==100) {
+        const diff = 100-rs;
+        if (b>=p&&b>=t) b+=diff;
+        else if (p>=b&&p>=t) p+=diff;
+        else t+=diff;
+    }
+
+    // ── STORE FOR FATIGUE ──
+    if (!predHistory[tableId]) predHistory[tableId]=[];
+    predHistory[tableId].push(best.name[0]);
+    if (predHistory[tableId].length>25) predHistory[tableId].shift();
+
+    // Gather meta stats
+    const acfM = m12_acf(arr);
+    const momM = m07_momentum(arr);
+    const mrM  = m10_meanRevert(arr);
+    const entM = m16_entropy(arr);
+    const hcM  = m13_hotcold(arr);
+    const volM = m15_volatility(arr, modules);
 
     return {
-        prediction, bankerRate:Math.max(b,4), playerRate:Math.max(p,4), tieRate:Math.max(t,2),
-        pattern, cau_goc:history, confidence,
-        tie_signal:tie.signal, tie_score:Math.round(tie.freq),
+        // FULL 3-SIDE PREDICTION
+        banker: {
+            prediction: 'Banker',
+            rate: b,
+            confidence: Math.round(confB),
+            signal: signal(b, confB),
+            label: `${b}% | Conf: ${Math.round(confB)}% | ${signal(b, confB)}`
+        },
+        player: {
+            prediction: 'Player',
+            rate: p,
+            confidence: Math.round(confP),
+            signal: signal(p, confP),
+            label: `${p}% | Conf: ${Math.round(confP)}% | ${signal(p, confP)}`
+        },
+        tie: {
+            prediction: 'Tie',
+            rate: t,
+            confidence: Math.round(confT),
+            signal: signal(t, confT),
+            label: `${t}% | Conf: ${Math.round(confT)}% | ${signal(t, confT)}`
+        },
+        recommend: best.name,
+        recommendRate: best.rate,
+        recommendConf: best.conf,
+        pattern,
+        cau_goc: history,
         stats: {
-            B:Math.round(freq.pct.B), P:Math.round(freq.pct.P), T:Math.round(freq.pct.T),
-            regime:regime.regime, acf:acf.type, momentum:mom.trend,
-            streak:`${streak.last.char}x${streak.last.len}`,
-            zigzag:zigzag.zz10, pattern22:patt.is22, pattern33:patt.is33,
-            patternCompletion:patcomp.match, hotSide:hotcold.hotSide,
-            meanRevert:mrev.revertTo, volatility:Math.round(vol.vol*100),
-            entropy:Math.round(ent.entropy*10)/10,
-            predictability:Math.round(ent.predictability*100),
-            tieGap:Math.round(tie.avgGap||0), tieFreq:Math.round(tie.freq),
-            spread:spread
+            B: Math.round(rB), P: Math.round(rP), T: Math.round(rT),
+            regime: reg.meta?.regime,
+            streak: stk.meta?.streak,
+            acf: acfM.meta?.acf1,
+            momentum: momM.meta?.ewm,
+            meanRevertB: mrM.meta?.bDev,
+            meanRevertP: mrM.meta?.pDev,
+            entropy: entM.meta?.entropy,
+            predictability: entM.meta?.predictability,
+            hotB: hcM.meta?.bHot,
+            hotP: hcM.meta?.pHot,
+            pattern: ptt.meta?.pattern,
+            tieFreq: Math.round(tieM.meta?.freq||0),
+            modules: 20
         }
     };
 }
@@ -582,12 +707,12 @@ function predictBCR(history, tableId='UNKNOWN') {
 async function fetchTableData(tableId) {
     try {
         const url = `${API_BASE}/api/baccarat/${tableId.toUpperCase()}`;
-        console.log(`📡 Gọi API: ${url}`);
-        const response = await axios.get(url, { timeout: 15000 });
-        if (response.data?.success && response.data?.data) return response.data.data.result || '';
+        console.log(`📡 ${url}`);
+        const res = await axios.get(url, { timeout: 15000 });
+        if (res.data?.success && res.data?.data) return res.data.data.result||'';
         return '';
-    } catch (error) {
-        console.error(`❌ Lỗi bàn ${tableId}:`, error.message);
+    } catch(e) {
+        console.error(`❌ ${tableId}:`, e.message);
         return '';
     }
 }
@@ -598,33 +723,52 @@ app.get('/api/predict/:tableId', async (req, res) => {
         const cauGoc = await fetchTableData(tableId);
         if (!cauGoc) return res.json({ success:false, message:`Không tìm thấy bàn ${tableId}` });
 
-        const oldData = lastData[tableId]||'';
-        const isNewData = cauGoc!==oldData && cauGoc.length>oldData.length;
+        const old = lastData[tableId]||'';
+        const isNew = cauGoc!==old && cauGoc.length>old.length;
         lastData[tableId] = cauGoc;
         if (!sessionData[tableId]) sessionData[tableId]=0;
-        if (isNewData) sessionData[tableId]++;
+        if (isNew) sessionData[tableId]++;
 
-        const result = predictBCR(cauGoc, tableId);
+        const r = predictVIP(cauGoc, tableId);
 
         res.json({
-            success:true,
-            bàn:`Bàn ${tableId}`,
-            phiên:sessionData[tableId],
-            cầu_gốc:cauGoc,
-            dự_đoán:result.prediction,
-            banker_rate:`${result.bankerRate}%`,
-            player_rate:`${result.playerRate}%`,
-            tie_rate:`${result.tieRate}%`,
-            dự_đoán_tie:result.tie_signal?'CÓ':'KHÔNG',
-            cầu:result.pattern,
-            confidence:`${result.confidence}%`,
-            spread:`${result.stats.spread}%`,
-            stats:result.stats,
-            engine:'v15.1.0-FIXED',
-            id:'@tranhoang2286'
+            success: true,
+            engine: 'VIP-v16.0.0-20MODULE',
+            bàn: `Bàn ${tableId}`,
+            phiên: sessionData[tableId],
+            cầu_gốc: cauGoc,
+
+            // ── FULL 3-SIDE ──
+            BANKER: {
+                tỉ_lệ: `${r.banker.rate}%`,
+                độ_tin_cậy: `${r.banker.confidence}%`,
+                tín_hiệu: r.banker.signal,
+                nhãn: r.banker.label
+            },
+            PLAYER: {
+                tỉ_lệ: `${r.player.rate}%`,
+                độ_tin_cậy: `${r.player.confidence}%`,
+                tín_hiệu: r.player.signal,
+                nhãn: r.player.label
+            },
+            TIE: {
+                tỉ_lệ: `${r.tie.rate}%`,
+                độ_tin_cậy: `${r.tie.confidence}%`,
+                tín_hiệu: r.tie.signal,
+                nhãn: r.tie.label
+            },
+
+            // ── RECOMMENDATION ──
+            khuyến_nghị: r.recommend,
+            tỉ_lệ_khuyến_nghị: `${r.recommendRate}%`,
+            confidence_khuyến_nghị: `${r.recommendConf}%`,
+
+            cầu: r.pattern,
+            stats: r.stats,
+            id: '@tranhoang2286'
         });
-    } catch(error) {
-        res.status(500).json({ success:false, error:error.message });
+    } catch(e) {
+        res.status(500).json({ success:false, error:e.message });
     }
 });
 
@@ -635,30 +779,26 @@ app.get('/api/predict/all', async (req, res) => {
         for (const id of tableIds) {
             const cauGoc = await fetchTableData(id);
             if (!cauGoc) continue;
-            const oldData = lastData[id]||'';
-            const isNewData = cauGoc!==oldData && cauGoc.length>oldData.length;
+            const old = lastData[id]||'';
+            const isNew = cauGoc!==old && cauGoc.length>old.length;
             lastData[id] = cauGoc;
             if (!sessionData[id]) sessionData[id]=0;
-            if (isNewData) sessionData[id]++;
-            const result = predictBCR(cauGoc, id);
+            if (isNew) sessionData[id]++;
+            const r = predictVIP(cauGoc, id);
             results.push({
-                bàn:`Bàn ${id}`,
-                phiên:sessionData[id],
-                cầu_gốc:cauGoc,
-                dự_đoán:result.prediction,
-                banker_rate:`${result.bankerRate}%`,
-                player_rate:`${result.playerRate}%`,
-                tie_rate:`${result.tieRate}%`,
-                dự_đoán_tie:result.tie_signal?'CÓ':'KHÔNG',
-                cầu:result.pattern,
-                confidence:`${result.confidence}%`,
-                spread:`${result.stats.spread}%`,
-                regime:result.stats.regime
+                bàn: `Bàn ${id}`,
+                cầu_gốc: cauGoc,
+                BANKER: `${r.banker.rate}% (${r.banker.signal})`,
+                PLAYER: `${r.player.rate}% (${r.player.signal})`,
+                TIE:    `${r.tie.rate}% (${r.tie.signal})`,
+                khuyến_nghị: r.recommend,
+                confidence: `${r.recommendConf}%`,
+                cầu: r.pattern
             });
         }
-        res.json({ success:true, data:results, total:results.length, engine:'v15.1.0-FIXED', id:'@tranhoang2286' });
-    } catch(error) {
-        res.status(500).json({ success:false, error:error.message });
+        res.json({ success:true, data:results, total:results.length, engine:'VIP-v16.0.0', id:'@tranhoang2286' });
+    } catch(e) {
+        res.status(500).json({ success:false, error:e.message });
     }
 });
 
@@ -668,32 +808,46 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
         const result = await fetchTableData(tableId);
         if (result) res.json({ success:true, data:{ table:tableId, result, shoeId:'', round:'' } });
         else res.json({ success:false, message:`Không tìm thấy bàn ${tableId}` });
-    } catch(error) {
-        res.status(500).json({ success:false, error:error.message });
+    } catch(e) {
+        res.status(500).json({ success:false, error:e.message });
     }
 });
 
 app.get('/', (req, res) => {
     res.json({
-        name:'BACCARAT PREDICTION ULTRA',
-        version:'15.1.0-FIXED',
-        author:'@tranhoang2286',
-        fix:'Bỏ hard-clamp, dùng weighted vote system, spread tự nhiên',
-        endpoints:{
-            'Dự đoán 1 bàn':'/api/predict/:tableId',
-            'Dự đoán tất cả':'/api/predict/all',
-            'Lấy dữ liệu bàn':'/api/baccarat/:tableId'
+        name: 'BACCARAT VIP ULTRA — FULL B/P/T',
+        version: '16.0.0',
+        author: '@tranhoang2286',
+        modules: [
+            'M01 Bayesian Frequency',    'M02 Streak Dynamics',
+            'M03 Zigzag Windowed',       'M04 Multi-Pattern (5 types)',
+            'M05 Markov O1+O2',          'M06 Markov Order-3',
+            'M07 EWM Momentum',          'M08 Multi-Window (4 windows)',
+            'M09 Tie Cycle Detector',    'M10 Mean Reversion',
+            'M11 Regime Classifier',     'M12 ACF Lag 1+2',
+            'M13 Hot/Cold Cooldown',     'M14 Pattern Completion',
+            'M15 Volatility Adaptive',   'M16 Entropy Signal',
+            'M17 Recency Decay Vote',    'M18 House Edge Baseline',
+            'M19 Session Fatigue',       'M20 Cluster Analysis'
+        ],
+        output: 'BANKER% + PLAYER% + TIE% — đều có confidence + signal riêng',
+        endpoints: {
+            'Dự đoán 1 bàn': '/api/predict/:tableId',
+            'Dự đoán tất cả': '/api/predict/all',
+            'Lấy dữ liệu bàn': '/api/baccarat/:tableId'
         }
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('══════════════════════════════════════════');
-    console.log('🃏 BACCARAT PREDICTION — v15.1.0 FIXED');
-    console.log('══════════════════════════════════════════');
+    console.log('══════════════════════════════════════════════');
+    console.log('🃏 BACCARAT VIP ULTRA — v16.0.0 FULL B/P/T');
+    console.log('══════════════════════════════════════════════');
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log('🔧 FIX: Weighted vote system, no hard-clamp');
-    console.log('📌 16 methods, dynamic spread');
+    console.log('📌 20 MODULES — ZERO RANDOM — FULL SEPARATE');
+    console.log('   B có tỉ lệ riêng + conf riêng + signal riêng');
+    console.log('   P có tỉ lệ riêng + conf riêng + signal riêng');
+    console.log('   T có tỉ lệ riêng + conf riêng + signal riêng');
     console.log(`👤 @tranhoang2286`);
-    console.log('══════════════════════════════════════════');
+    console.log('══════════════════════════════════════════════');
 });
