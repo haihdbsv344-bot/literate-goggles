@@ -25,7 +25,7 @@ function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
 function mean(arr) { return arr.length ? sum(arr) / arr.length : 0; }
 
 // ============================================================
-// 20 MODULES
+// 20 MODULES - MỖI BÀN PHÂN TÍCH ĐỘC LẬP
 // ============================================================
 
 // M01: BAYESIAN FREQUENCY
@@ -494,35 +494,44 @@ function m20_cluster(arr) {
 }
 
 // ============================================================
-// MASTER PREDICTOR
+// MASTER PREDICTOR - FIX: CHỈ DỰ ĐOÁN KHI TỈ LỆ >= 58%
 // ============================================================
 function predictVIP(history, tableId = 'UNKNOWN') {
     const DEFAULT = {
         banker: { prediction: 'Banker', rate: 46, confidence: 50, signal: 'NEUTRAL' },
         player: { prediction: 'Player', rate: 44, confidence: 50, signal: 'NEUTRAL' },
         tie: { prediction: 'Tie', rate: 10, confidence: 50, signal: 'NEUTRAL' },
-        recommend: 'Player',
-        recommendRate: 44,
-        recommendConf: 50,
+        recommend: 'Chờ',
+        recommendRate: 0,
+        recommendConf: 0,
         pattern: 'Chưa đủ dữ liệu',
         cau_goc: history || '',
         stats: {}
     };
 
-    if (!history || history.length < 5) return DEFAULT;
+    if (!history || history.length < 10) return DEFAULT;
     const arr = toArr(history);
-    if (arr.length < 5) return DEFAULT;
+    if (arr.length < 10) return DEFAULT;
 
-    // Run all 20 modules
+    // ── PHÂN TÍCH ĐỘC LẬP CHO MỖI BÀN ──
+    // Lấy riêng dữ liệu của bàn này
+    const tableHistory = arr;
+    
+    // Run all 20 modules trên chính dữ liệu của bàn đó
     const modules = [
-        m01_bayesFreq(arr), m02_streak(arr), m03_zigzag(arr), m04_patterns(arr),
-        m05_markov(arr), m06_markov3(arr), m07_momentum(arr), m08_windows(arr),
-        m09_tie(arr), m10_meanRevert(arr), m11_regime(arr), m12_acf(arr),
-        m13_hotcold(arr), m14_patComp(arr), m15_volatility(arr), m16_entropy(arr),
-        m17_recencyDecay(arr), m18_houseEdge(arr), m19_fatigue(tableId), m20_cluster(arr)
+        m01_bayesFreq(tableHistory), m02_streak(tableHistory), 
+        m03_zigzag(tableHistory), m04_patterns(tableHistory),
+        m05_markov(tableHistory), m06_markov3(tableHistory), 
+        m07_momentum(tableHistory), m08_windows(tableHistory),
+        m09_tie(tableHistory), m10_meanRevert(tableHistory), 
+        m11_regime(tableHistory), m12_acf(tableHistory),
+        m13_hotcold(tableHistory), m14_patComp(tableHistory), 
+        m15_volatility(tableHistory), m16_entropy(tableHistory),
+        m17_recencyDecay(tableHistory), m18_houseEdge(tableHistory), 
+        m19_fatigue(tableId), m20_cluster(tableHistory)
     ];
 
-    // Weighted ensemble
+    // ── WEIGHTED ENSEMBLE ──
     let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
     for (const m of modules) {
         if (!m || m.weight <= 0) continue;
@@ -535,39 +544,70 @@ function predictVIP(history, tableId = 'UNKNOWN') {
     let rP = (sumP / totalW) * 100;
     let rT = (sumT / totalW) * 100;
 
-    // Soft floor & normalize
-    rB = Math.max(rB, 8);
-    rP = Math.max(rP, 8);
-    rT = Math.max(rT, 3);
+    // ── NORMALIZE ──
     const rawSum = rB + rP + rT;
     rB = (rB / rawSum) * 100;
     rP = (rP / rawSum) * 100;
     rT = (rT / rawSum) * 100;
 
-    // Confidence per side
+    // ── TÍNH CONFIDENCE ──
     const avgOthersB = (rP + rT) / 2;
     const avgOthersP = (rB + rT) / 2;
     const avgOthersT = (rB + rP) / 2;
-    const confB = clamp(50 + (rB - avgOthersB) * 1.8, 48, 92);
-    const confP = clamp(50 + (rP - avgOthersP) * 1.8, 48, 92);
-    const confT = clamp(50 + (rT - avgOthersT) * 1.8, 40, 85);
+    const confB = clamp(50 + (rB - avgOthersB) * 2.5, 40, 95);
+    const confP = clamp(50 + (rP - avgOthersP) * 2.5, 40, 95);
+    const confT = clamp(50 + (rT - avgOthersT) * 2.5, 35, 90);
 
-    function signal(rate, conf) {
-        if (conf >= 78) return 'STRONG';
-        if (conf >= 65) return 'MEDIUM';
-        return 'WEAK';
+    // ── CHỈ DỰ ĐOÁN KHI CONFIDENCE >= 58% ──
+    // VÀ CHÊNH LỆCH TỐI THIỂU 8% GIỮA CÁC CỬA
+    const sides = [
+        { name: 'Banker', rate: Math.round(rB), conf: Math.round(confB) },
+        { name: 'Player', rate: Math.round(rP), conf: Math.round(confP) },
+        { name: 'Tie', rate: Math.round(rT), conf: Math.round(confT) }
+    ];
+    
+    // Sắp xếp theo confidence giảm dần
+    sides.sort((a, b) => b.conf - a.conf);
+    const best = sides[0];
+    const second = sides[1];
+    
+    // KIỂM TRA ĐIỀU KIỆN DỰ ĐOÁN:
+    // 1. Confidence >= 58%
+    // 2. Chênh lệch với cửa thứ 2 >= 8%
+    let canPredict = false;
+    let finalRecommend = 'Chờ';
+    let finalRate = 0;
+    let finalConf = 0;
+    
+    if (best.conf >= 58 && (best.conf - second.conf) >= 8) {
+        canPredict = true;
+        finalRecommend = best.name;
+        finalRate = best.rate;
+        finalConf = best.conf;
+    } else if (best.conf >= 65 && (best.conf - second.conf) >= 5) {
+        canPredict = true;
+        finalRecommend = best.name;
+        finalRate = best.rate;
+        finalConf = best.conf;
     }
 
-    // Pattern detection
-    const reg = m11_regime(arr);
-    const stk = m02_streak(arr);
-    const ptt = m04_patterns(arr);
-    const tieM = m09_tie(arr);
-    const zzM = m03_zigzag(arr);
-    const pcM = m14_patComp(arr);
+    function signal(rate, conf) {
+        if (conf >= 80) return '🔥 STRONG';
+        if (conf >= 70) return '⚡ MEDIUM';
+        if (conf >= 60) return '💡 WEAK';
+        return '⏳ CHỜ';
+    }
+
+    // ── PATTERN DETECTION ──
+    const reg = m11_regime(tableHistory);
+    const stk = m02_streak(tableHistory);
+    const ptt = m04_patterns(tableHistory);
+    const tieM = m09_tie(tableHistory);
+    const zzM = m03_zigzag(tableHistory);
+    const pcM = m14_patComp(tableHistory);
 
     let pattern = 'Cầu đan xen';
-    if (tieM.meta?.gapScore >= 0.85) {
+    if (tieM.meta?.gapScore >= 0.85 && tieM.meta?.freq > 8) {
         pattern = `🔮 TIE SIGNAL — Gap=${Math.round(tieM.meta?.avgGap||0)}, Freq=${Math.round(tieM.meta?.freq||0)}%, Score=${Math.round((tieM.meta?.gapScore||0)*100)}%`;
     } else if (reg.meta?.regime === 'CHOP') {
         pattern = `⚡ Chop Regime (${reg.meta?.swRate}% switches)`;
@@ -581,15 +621,7 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         pattern = `🔍 Sequence Match (conf=${pcM.meta?.conf}%, n=${pcM.meta?.samples})`;
     }
 
-    // Recommend
-    const sides = [
-        { name: 'Banker', rate: Math.round(rB), conf: Math.round(confB) },
-        { name: 'Player', rate: Math.round(rP), conf: Math.round(confP) },
-        { name: 'Tie', rate: Math.round(rT), conf: Math.round(confT) }
-    ];
-    const best = sides.reduce((a, b) => a.conf > b.conf ? a : b);
-
-    // Round & sum=100
+    // ── ROUND TỈ LỆ ──
     let b = Math.round(rB), p = Math.round(rP), t = Math.round(rT);
     const rs = b + p + t;
     if (rs !== 100) {
@@ -599,9 +631,13 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         else t += diff;
     }
 
-    // Store for fatigue
+    // Store history
     if (!predHistory[tableId]) predHistory[tableId] = [];
-    predHistory[tableId].push(best.name[0]);
+    if (canPredict) {
+        predHistory[tableId].push(finalRecommend[0]);
+    } else {
+        predHistory[tableId].push('W');
+    }
     if (predHistory[tableId].length > 25) predHistory[tableId].shift();
 
     return {
@@ -626,27 +662,27 @@ function predictVIP(history, tableId = 'UNKNOWN') {
             signal: signal(t, confT),
             label: `${t}% | Conf: ${Math.round(confT)}% | ${signal(t, confT)}`
         },
-        recommend: best.name,
-        recommendRate: best.rate,
-        recommendConf: best.conf,
+        recommend: finalRecommend,
+        recommendRate: finalRate,
+        recommendConf: finalConf,
+        canPredict: canPredict,
         pattern,
         cau_goc: history,
         stats: {
-            B: Math.round(rB),
-            P: Math.round(rP),
-            T: Math.round(rT),
+            B: b, P: p, T: t,
             regime: reg.meta?.regime,
             streak: stk.meta?.streak,
-            acf: m12_acf(arr).meta?.acf1,
-            momentum: m07_momentum(arr).meta?.ewm,
-            meanRevertB: m10_meanRevert(arr).meta?.bDev,
-            meanRevertP: m10_meanRevert(arr).meta?.pDev,
-            entropy: m16_entropy(arr).meta?.entropy,
-            predictability: m16_entropy(arr).meta?.predictability,
-            hotB: m13_hotcold(arr).meta?.bHot,
-            hotP: m13_hotcold(arr).meta?.pHot,
+            acf: m12_acf(tableHistory).meta?.acf1,
+            momentum: m07_momentum(tableHistory).meta?.ewm,
+            meanRevertB: m10_meanRevert(tableHistory).meta?.bDev,
+            meanRevertP: m10_meanRevert(tableHistory).meta?.pDev,
+            entropy: m16_entropy(tableHistory).meta?.entropy,
+            predictability: m16_entropy(tableHistory).meta?.predictability,
+            hotB: m13_hotcold(tableHistory).meta?.bHot,
+            hotP: m13_hotcold(tableHistory).meta?.pHot,
             pattern: ptt.meta?.pattern,
             tieFreq: Math.round(tieM.meta?.freq || 0),
+            diff: Math.round(best.conf - second.conf),
             modules: 20
         }
     };
@@ -668,7 +704,7 @@ async function fetchTableData(tableId) {
     }
 }
 
-// ── API: Dự đoán 1 bàn (JSON gọn) ──
+// ── API: Dự đoán 1 bàn ──
 app.get('/api/predict/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
@@ -688,16 +724,24 @@ app.get('/api/predict/:tableId', async (req, res) => {
 
         const r = predictVIP(cauGoc, tableId);
 
-        // ── TRẢ VỀ JSON GỌN ──
-        res.json({
+        // ── JSON GỌN ──
+        const result = {
             phiên: sessionData[tableId],
             cầu_gốc: cauGoc,
             Dự_đoán: r.recommend,
-            Tỉ_lệ: `${r.recommendRate}%`,
+            Tỉ_lệ: r.canPredict ? `${r.recommendRate}%` : 'Chờ',
+            Độ_tin_cậy: r.canPredict ? `${r.recommendConf}%` : 'Chờ',
             Dự_đoán_Tie: r.tie.prediction,
             Tỉ_lệ_tie: `${r.tie.rate}%`,
-            Cầu: r.pattern
-        });
+            Cầu: r.pattern,
+            BANKER: `${r.banker.rate}% (${r.banker.signal})`,
+            PLAYER: `${r.player.rate}% (${r.player.signal})`,
+            TIE: `${r.tie.rate}% (${r.tie.signal})`,
+            chênh_lệch: r.canPredict ? `${r.stats.diff}%` : 'Chưa đủ',
+            trạng_thái: r.canPredict ? '✅ CÓ DỰ ĐOÁN' : '⏳ CHỜ THÊM DỮ LIỆU'
+        };
+
+        res.json(result);
     } catch (e) {
         res.status(500).json({ 
             success: false, 
@@ -706,7 +750,7 @@ app.get('/api/predict/:tableId', async (req, res) => {
     }
 });
 
-// ── API: Dự đoán tất cả bàn (JSON gọn) ──
+// ── API: Dự đoán tất cả bàn ──
 app.get('/api/predict/all', async (req, res) => {
     try {
         const tableIds = ['C01', 'C02', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10', 'C11', 'C15', 'C16', 'C17', 'C18', 'C19', 'C20'];
@@ -726,18 +770,21 @@ app.get('/api/predict/all', async (req, res) => {
             
             predictions[id] = {
                 cầu_gốc: cauGoc,
-                B: `${r.banker.rate}%`,
-                P: `${r.player.rate}%`,
-                T: `${r.tie.rate}%`,
-                khuyến_nghị: r.recommend,
-                tin_cậy: `${r.recommendConf}%`,
-                cầu: r.pattern
+                phiên: sessionData[id],
+                Dự_đoán: r.recommend,
+                Tỉ_lệ: r.canPredict ? `${r.recommendRate}%` : 'Chờ',
+                Độ_tin_cậy: r.canPredict ? `${r.recommendConf}%` : 'Chờ',
+                BANKER: `${r.banker.rate}%`,
+                PLAYER: `${r.player.rate}%`, 
+                TIE: `${r.tie.rate}%`,
+                cầu: r.pattern,
+                trạng_thái: r.canPredict ? '✅' : '⏳'
             };
         }
 
         res.json({
             success: true,
-            engine: 'VIP-v16.0.0-20MODULE',
+            engine: 'VIP-v16.0.0-FIXED',
             timestamp: new Date().toISOString(),
             author: '@tranhoang2286',
             predictions
@@ -765,25 +812,19 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
 // ── Root ──
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT VIP ULTRA — FULL B/P/T',
-        version: '16.0.0',
+        name: 'BACCARAT VIP ULTRA — FIXED v16.1',
+        version: '16.1.0',
         author: '@tranhoang2286',
-        modules: [
-            'M01 Bayesian Frequency', 'M02 Streak Dynamics',
-            'M03 Zigzag Windowed', 'M04 Multi-Pattern (5 types)',
-            'M05 Markov O1+O2', 'M06 Markov Order-3',
-            'M07 EWM Momentum', 'M08 Multi-Window (4 windows)',
-            'M09 Tie Cycle Detector', 'M10 Mean Reversion',
-            'M11 Regime Classifier', 'M12 ACF Lag 1+2',
-            'M13 Hot/Cold Cooldown', 'M14 Pattern Completion',
-            'M15 Volatility Adaptive', 'M16 Entropy Signal',
-            'M17 Recency Decay Vote', 'M18 House Edge Baseline',
-            'M19 Session Fatigue', 'M20 Cluster Analysis'
+        features: [
+            '✅ Mỗi bàn phân tích độc lập',
+            '✅ Chỉ dự đoán khi confidence >= 58%',
+            '✅ Chênh lệch tối thiểu 8% với cửa thứ 2',
+            '✅ Nếu không đủ điều kiện -> trả về "Chờ"',
+            '✅ Tỉ lệ Banker/Player/Tie đầy đủ'
         ],
-        output: 'BANKER% + PLAYER% + TIE% — đều có confidence + signal riêng',
         endpoints: {
-            'Dự đoán 1 bàn (JSON gọn)': '/api/predict/:tableId',
-            'Dự đoán tất cả (JSON gọn)': '/api/predict/all',
+            'Dự đoán 1 bàn': '/api/predict/:tableId',
+            'Dự đoán tất cả': '/api/predict/all',
             'Lấy dữ liệu bàn': '/api/baccarat/:tableId'
         }
     });
@@ -791,13 +832,13 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('══════════════════════════════════════════════');
-    console.log('🃏 BACCARAT VIP ULTRA — v16.0.0 FULL B/P/T');
+    console.log('🃏 BACCARAT VIP ULTRA — FIXED v16.1');
     console.log('══════════════════════════════════════════════');
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log('📌 20 MODULES — ZERO RANDOM — FULL SEPARATE');
-    console.log('   B có tỉ lệ riêng + conf riêng + signal riêng');
-    console.log('   P có tỉ lệ riêng + conf riêng + signal riêng');
-    console.log('   T có tỉ lệ riêng + conf riêng + signal riêng');
+    console.log('✅ FIX: Mỗi bàn phân tích độc lập');
+    console.log('✅ FIX: Chỉ dự đoán khi confidence >= 58%');
+    console.log('✅ FIX: Chênh lệch tối thiểu 8%');
+    console.log('✅ FIX: Không đủ điều kiện -> trả "Chờ"');
     console.log(`👤 @tranhoang2286`);
     console.log('══════════════════════════════════════════════');
 });
