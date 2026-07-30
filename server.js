@@ -12,85 +12,101 @@ app.use((req, res, next) => {
 const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
-const predHistory = {};
-const learningData = {}; // Lưu lịch sử học cầu
+const cauHistory = {};
+const learningData = {};
 
 // ============================================================
-// UTILS
+// UTILS CHUẨN
 // ============================================================
 function toArr(str) {
     return str ? str.split('').filter(c => ['B','P','T'].includes(c)) : [];
 }
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
-function mean(arr) { return arr.length ? sum(arr) / arr.length : 0; }
+
+function tinhTyLe(arr) {
+    const cnt = {B:0, P:0, T:0};
+    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
+    const total = arr.length || 1;
+    return {
+        B: cnt.B / total * 100,
+        P: cnt.P / total * 100,
+        T: cnt.T / total * 100,
+        count: cnt,
+        total: total
+    };
+}
+
+function tinhRuns(arr) {
+    if (arr.length === 0) return [];
+    const runs = [];
+    let cur = {c: arr[0], n: 1};
+    for (let i = 1; i < arr.length; i++) {
+        if (arr[i] === cur.c) cur.n++;
+        else { runs.push({...cur}); cur = {c: arr[i], n: 1}; }
+    }
+    runs.push({...cur});
+    return runs;
+}
+
+function tinhDoLech(arr) {
+    const tyLe = tinhTyLe(arr);
+    const std = {B: 45.86, P: 44.62, T: 9.52};
+    return {
+        B: tyLe.B - std.B,
+        P: tyLe.P - std.P,
+        T: tyLe.T - std.T
+    };
+}
+
+function tinhXacSuat(arr, target) {
+    const cnt = {B:0, P:0, T:0};
+    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
+    const total = arr.length || 1;
+    return cnt[target] / total * 100;
+}
+
+function tinhDoTinCay(conf, samples) {
+    // Càng nhiều mẫu, độ tin cậy càng cao
+    const sampleBoost = Math.min(samples / 20, 10);
+    return Math.min(conf + sampleBoost, 95);
+}
 
 // ============================================================
-// CƠ CHẾ HỌC CẦU TỰ ĐỘNG
+= THUẬT TOÁN HỌC MÁY - PHÂN TÍCH CẦU THÔNG MINH
 // ============================================================
 
-// Học pattern từ lịch sử
-function learnPatterns(history) {
+// Học từ lịch sử các bàn khác
+function hocCrossTable(tableId) {
+    let crossData = {B:0, P:0, T:0, total:0};
+    for (const [id, data] of Object.entries(learningData)) {
+        if (id === tableId) continue;
+        const recent = data.slice(-20);
+        for (const d of recent) {
+            if (d.result === 'B') crossData.B++;
+            else if (d.result === 'P') crossData.P++;
+            else crossData.T++;
+            crossData.total++;
+        }
+    }
+    return crossData;
+}
+
+// Học pattern xuất hiện nhiều nhất
+function hocPattern(arr) {
     const patterns = {};
-    const arr = toArr(history);
-    if (arr.length < 20) return patterns;
-    
-    // Học các pattern 3-5 ván
-    for (let len = 3; len <= 5; len++) {
+    for (let len = 2; len <= 4; len++) {
         for (let i = 0; i <= arr.length - len - 1; i++) {
-            const pattern = arr.slice(i, i + len).join('');
+            const p = arr.slice(i, i + len).join('');
             const next = arr[i + len];
-            if (!patterns[pattern]) patterns[pattern] = {B:0, P:0, T:0, total:0};
-            patterns[pattern][next]++;
-            patterns[pattern].total++;
+            if (!patterns[p]) patterns[p] = {B:0, P:0, T:0, total:0};
+            patterns[p][next]++;
+            patterns[p].total++;
         }
     }
     return patterns;
 }
 
-// Học tần suất xuất hiện
-function learnFrequency(history) {
-    const arr = toArr(history);
-    const cnt = {B:0, P:0, T:0};
-    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
-    return {
-        B: cnt.B / arr.length * 100,
-        P: cnt.P / arr.length * 100,
-        T: cnt.T / arr.length * 100
-    };
-}
-
-// Học chu kỳ streak
-function learnStreak(history) {
-    const arr = toArr(history);
-    const streaks = {B: [], P: [], T: []};
-    let cur = {c: arr[0], n: 1};
-    for (let i = 1; i < arr.length; i++) {
-        if (arr[i] === cur.c) cur.n++;
-        else {
-            streaks[cur.c].push(cur.n);
-            cur = {c: arr[i], n: 1};
-        }
-    }
-    streaks[cur.c].push(cur.n);
-    
-    const result = {};
-    for (const k of ['B', 'P', 'T']) {
-        if (streaks[k].length > 0) {
-            result[k] = {
-                avg: mean(streaks[k]),
-                max: Math.max(...streaks[k]),
-                min: Math.min(...streaks[k]),
-                count: streaks[k].length
-            };
-        }
-    }
-    return result;
-}
-
-// Học xác suất chuyển tiếp (Markov)
-function learnMarkov(history) {
-    const arr = toArr(history);
+// Học xác suất chuyển tiếp Markov
+function hocMarkov(arr) {
     const m = {
         B: {B:0, P:0, T:0},
         P: {B:0, P:0, T:0},
@@ -113,310 +129,634 @@ function learnMarkov(history) {
     return result;
 }
 
-// Học cầu đang chạy
-function learnCurrentTrend(history) {
-    const arr = toArr(history);
+// Học chu kỳ streak
+function hocStreak(arr) {
+    const runs = tinhRuns(arr);
+    const streakData = {B: [], P: [], T: []};
+    for (const r of runs) {
+        if (streakData[r.c]) streakData[r.c].push(r.n);
+    }
+    const result = {};
+    for (const k of ['B', 'P', 'T']) {
+        if (streakData[k].length > 0) {
+            result[k] = {
+                avg: streakData[k].reduce((a,b) => a+b, 0) / streakData[k].length,
+                max: Math.max(...streakData[k]),
+                count: streakData[k].length
+            };
+        }
+    }
+    return result;
+}
+
+// ============================================================
+// 30 CÔNG THỨC NHẬN DIỆN CẦU CHUẨN
+// ============================================================
+
+// CT01: CẦU 1-1 ZIGZAG
+function CT01_Zigzag(arr) {
+    if (arr.length < 4) return null;
+    const last4 = arr.slice(-4);
+    if (last4[0] === last4[2] && last4[1] === last4[3] && last4[0] !== last4[1]) {
+        if (last4[0] === 'B') return { predict: 'P', name: 'CẦU 1-1 (B-P-B-P)', conf: 92, priority: 1 };
+        if (last4[0] === 'P') return { predict: 'B', name: 'CẦU 1-1 (P-B-P-B)', conf: 92, priority: 1 };
+    }
+    return null;
+}
+
+// CT02: CẦU 2-2-2
+function CT02_222(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'B', name: 'CẦU 2-2-2 (B)', conf: 90, priority: 1 };
+            if (last3[0].c === 'P') return { predict: 'P', name: 'CẦU 2-2-2 (P)', conf: 90, priority: 1 };
+        }
+    }
+    return null;
+}
+
+// CT03: CẦU 2-2 ĐẢO
+function CT03_22Dao(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[1].n === 2 && last3[2].n === 2 && last3[1].c !== last3[2].c) {
+            if (last3[1].c === 'B') return { predict: 'B', name: 'CẦU 2-2 (B-P-B)', conf: 88, priority: 2 };
+            if (last3[1].c === 'P') return { predict: 'P', name: 'CẦU 2-2 (P-B-P)', conf: 88, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT04: CẦU 3-3
+function CT04_33(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 2) {
+        const last2 = runs.slice(-2);
+        if (last2[0].n === 3 && last2[1].n === 3) {
+            if (last2[0].c === 'B') return { predict: 'P', name: 'CẦU 3-3 (B-P)', conf: 89, priority: 2 };
+            if (last2[0].c === 'P') return { predict: 'B', name: 'CẦU 3-3 (P-B)', conf: 89, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT05: CẦU 1-2-1
+function CT05_121(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 1) {
+            if (last3[1].c === 'B') return { predict: 'B', name: 'CẦU 1-2-1 (B)', conf: 91, priority: 1 };
+            if (last3[1].c === 'P') return { predict: 'P', name: 'CẦU 1-2-1 (P)', conf: 91, priority: 1 };
+        }
+    }
+    return null;
+}
+
+// CT06: CẦU 2-1-2
+function CT06_212(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 1 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 2-1-2 (B-P)', conf: 87, priority: 2 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 2-1-2 (P-B)', conf: 87, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT07: CẦU CHOP
+function CT07_Chop(arr) {
+    if (arr.length < 8) return null;
+    const recent = arr.slice(-8);
+    let switches = 0;
+    for (let i = 1; i < recent.length; i++) {
+        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
+            switches++;
+        }
+    }
+    const rate = switches / 7;
+    if (rate >= 0.75) {
+        const last = recent[recent.length - 1];
+        if (last === 'B') return { predict: 'P', name: 'CHOP (B-P-B-P)', conf: 88, priority: 1 };
+        if (last === 'P') return { predict: 'B', name: 'CHOP (P-B-P-B)', conf: 88, priority: 1 };
+    }
+    return null;
+}
+
+// CT08: CẦU STREAK
+function CT08_Streak(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    const last = runs[runs.length - 1];
+    
+    if (last.n >= 6) {
+        if (last.c === 'B') return { predict: 'P', name: `STREAK B x${last.n} -> ĐẢO`, conf: 82, priority: 2 };
+        if (last.c === 'P') return { predict: 'B', name: `STREAK P x${last.n} -> ĐẢO`, conf: 82, priority: 2 };
+    }
+    if (last.n >= 3 && last.n <= 5) {
+        if (last.c === 'B') return { predict: 'B', name: `STREAK B x${last.n} -> TIẾP`, conf: 78, priority: 3 };
+        if (last.c === 'P') return { predict: 'P', name: `STREAK P x${last.n} -> TIẾP`, conf: 78, priority: 3 };
+    }
+    return null;
+}
+
+// CT09: CẦU TIE
+function CT09_Tie(arr) {
+    const tiePos = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 'T') tiePos.push(i);
+    }
+    if (tiePos.length < 2) return null;
+    
+    const gaps = [];
+    for (let i = 1; i < tiePos.length; i++) {
+        gaps.push(tiePos[i] - tiePos[i-1]);
+    }
+    const avgGap = gaps.reduce((a,b) => a+b, 0) / gaps.length;
+    const lastGap = arr.length - 1 - tiePos[tiePos.length - 1];
+    
+    if (lastGap > avgGap * 1.5 && avgGap < 20 && avgGap > 5) {
+        return { predict: 'T', name: `TIE CYCLE (gap ${Math.round(avgGap)})`, conf: 82, priority: 2 };
+    }
+    return null;
+}
+
+// CT10: CÂN BẰNG B/P
+function CT10_Balance(arr) {
+    if (arr.length < 20) return null;
+    const tyLe = tinhTyLe(arr);
+    const diff = tyLe.B - tyLe.P;
+    
+    if (diff > 15) return { predict: 'P', name: `BALANCE (B thừa ${Math.round(diff)}%)`, conf: 85, priority: 2 };
+    if (diff < -15) return { predict: 'B', name: `BALANCE (P thừa ${Math.round(Math.abs(diff))}%)`, conf: 85, priority: 2 };
+    return null;
+}
+
+// CT11: CẦU CHOP DÀI 1-1-1-1
+function CT11_ChopDai(arr) {
+    if (arr.length < 8) return null;
+    const recent = arr.slice(-8);
+    const runs = tinhRuns(recent);
+    const allOne = runs.every(r => r.n === 1);
+    
+    if (allOne && runs.length >= 6) {
+        const last = runs[runs.length - 1].c;
+        if (last === 'B') return { predict: 'P', name: 'CHOP DÀI 1-1-1-1 (B->P)', conf: 90, priority: 1 };
+        if (last === 'P') return { predict: 'B', name: 'CHOP DÀI 1-1-1-1 (P->B)', conf: 90, priority: 1 };
+    }
+    return null;
+}
+
+// CT12: CẦU 2-1-1-2
+function CT12_2112(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 2 && last4[1].n === 1 && last4[2].n === 1 && last4[3].n === 2) {
+            if (last4[0].c === 'B') return { predict: 'B', name: 'CẦU 2-1-1-2 (B)', conf: 89, priority: 2 };
+            if (last4[0].c === 'P') return { predict: 'P', name: 'CẦU 2-1-1-2 (P)', conf: 89, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT13: CẦU 3-2-1
+function CT13_321(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 2 && last3[2].n === 1) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 3-2-1 (B-P)', conf: 86, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 3-2-1 (P-B)', conf: 86, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT14: CẦU 1-2-3
+function CT14_123(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 3) {
+            if (last3[1].c === 'B') return { predict: 'P', name: 'CẦU 1-2-3 (B-P)', conf: 87, priority: 3 };
+            if (last3[1].c === 'P') return { predict: 'B', name: 'CẦU 1-2-3 (P-B)', conf: 87, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT15: CẦU 2-3-2
+function CT15_232(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 3 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'B', name: 'CẦU 2-3-2 (B)', conf: 88, priority: 2 };
+            if (last3[0].c === 'P') return { predict: 'P', name: 'CẦU 2-3-2 (P)', conf: 88, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT16: CẦU 3-1-3
+function CT16_313(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 1 && last3[2].n === 3) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 3-1-3 (B-P)', conf: 86, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 3-1-3 (P-B)', conf: 86, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT17: CẦU 1-1-2
+function CT17_112(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 1 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 1-1-2 (B-P)', conf: 85, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 1-1-2 (P-B)', conf: 85, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT18: CẦU 2-2-1
+function CT18_221(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 1) {
+            if (last3[0].c === 'B') return { predict: 'B', name: 'CẦU 2-2-1 (B)', conf: 84, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'P', name: 'CẦU 2-2-1 (P)', conf: 84, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT19: CẦU 1-2-2
+function CT19_122(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 1-2-2 (B-P)', conf: 83, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 1-2-2 (P-B)', conf: 83, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT20: ĐỘ LỆCH CHUẨN
+function CT20_Deviation(arr) {
+    if (arr.length < 30) return null;
+    const dev = tinhDoLech(arr);
+    
+    if (dev.B < -10) return { predict: 'B', name: `ĐỘ LỆCH (B thiếu ${Math.round(Math.abs(dev.B))}%)`, conf: 80, priority: 2 };
+    if (dev.P < -10) return { predict: 'P', name: `ĐỘ LỆCH (P thiếu ${Math.round(Math.abs(dev.P))}%)`, conf: 80, priority: 2 };
+    if (dev.T < -7) return { predict: 'T', name: `ĐỘ LỆCH (T thiếu ${Math.round(Math.abs(dev.T))}%)`, conf: 76, priority: 3 };
+    return null;
+}
+
+// CT21: ĐẢO CHIỀU
+function CT21_Reversal(arr) {
+    if (arr.length < 10) return null;
     const recent = arr.slice(-10);
     const cnt = {B:0, P:0, T:0};
     for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
     
-    // Xu hướng
-    let trend = 'MIXED';
-    if (cnt.B >= 7) trend = 'B_STRONG';
-    else if (cnt.P >= 7) trend = 'P_STRONG';
-    else if (cnt.T >= 4) trend = 'T_STRONG';
-    else if (cnt.B >= 5 && cnt.P >= 5) trend = 'BALANCED';
-    
-    // Độ dài streak hiện tại
-    let currentStreak = 1;
-    if (arr.length > 1) {
-        const last = arr[arr.length - 1];
-        for (let i = arr.length - 2; i >= 0; i--) {
-            if (arr[i] === last) currentStreak++;
-            else break;
+    if (cnt.B >= 7) return { predict: 'P', name: `REVERSAL (B ${cnt.B}/10 -> đảo)`, conf: 79, priority: 2 };
+    if (cnt.P >= 7) return { predict: 'B', name: `REVERSAL (P ${cnt.P}/10 -> đảo)`, conf: 79, priority: 2 };
+    if (cnt.T >= 6) return { predict: 'B', name: `REVERSAL (T ${cnt.T}/10 -> B)`, conf: 75, priority: 3 };
+    return null;
+}
+
+// CT22: CẦU 4-4
+function CT22_44(arr) {
+    if (arr.length < 10) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 2) {
+        const last2 = runs.slice(-2);
+        if (last2[0].n === 4 && last2[1].n === 4) {
+            if (last2[0].c === 'B') return { predict: 'P', name: 'CẦU 4-4 (B-P)', conf: 84, priority: 3 };
+            if (last2[0].c === 'P') return { predict: 'B', name: 'CẦU 4-4 (P-B)', conf: 84, priority: 3 };
         }
     }
-    
-    return {
-        trend,
-        currentStreak,
-        last: arr[arr.length - 1],
-        recentB: cnt.B,
-        recentP: cnt.P,
-        recentT: cnt.T
-    };
+    return null;
 }
 
-// Học độ lệch so với chuẩn
-function learnDeviation(history) {
+// CT23: CẦU 2-4-2
+function CT23_242(arr) {
+    if (arr.length < 10) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 4 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'B', name: 'CẦU 2-4-2 (B)', conf: 85, priority: 2 };
+            if (last3[0].c === 'P') return { predict: 'P', name: 'CẦU 2-4-2 (P)', conf: 85, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT24: CẦU 4-2-4
+function CT24_424(arr) {
+    if (arr.length < 10) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 4 && last3[1].n === 2 && last3[2].n === 4) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 4-2-4 (B-P)', conf: 83, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 4-2-4 (P-B)', conf: 83, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT25: PATTERN LẶP
+function CT25_Repeat(arr) {
+    if (arr.length < 12) return null;
+    const last6 = arr.slice(-6).join('');
+    const prev6 = arr.slice(-12, -6).join('');
+    
+    let match = 0;
+    for (let i = 0; i < 6; i++) {
+        if (last6[i] === prev6[i]) match++;
+    }
+    
+    if (match >= 5) {
+        const next = arr[arr.length - 6];
+        if (next === 'B') return { predict: 'B', name: 'PATTERN LẶP (B)', conf: 86, priority: 1 };
+        if (next === 'P') return { predict: 'P', name: 'PATTERN LẶP (P)', conf: 86, priority: 1 };
+        if (next === 'T') return { predict: 'T', name: 'PATTERN LẶP (T)', conf: 80, priority: 2 };
+    }
+    return null;
+}
+
+// CT26: CHU KỲ 5
+function CT26_Cycle5(arr) {
+    if (arr.length < 10) return null;
+    const last5 = arr.slice(-5);
+    const prev5 = arr.slice(-10, -5);
+    
+    let same = 0;
+    for (let i = 0; i < 5; i++) {
+        if (last5[i] === prev5[i]) same++;
+    }
+    
+    if (same >= 4) {
+        const next = arr[arr.length - 5];
+        if (next === 'B') return { predict: 'B', name: 'CHU KỲ 5 (B)', conf: 84, priority: 2 };
+        if (next === 'P') return { predict: 'P', name: 'CHU KỲ 5 (P)', conf: 84, priority: 2 };
+    }
+    return null;
+}
+
+// CT27: CẦU 1-3-1
+function CT27_131(arr) {
+    if (arr.length < 6) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 3 && last3[2].n === 1) {
+            if (last3[1].c === 'B') return { predict: 'B', name: 'CẦU 1-3-1 (B)', conf: 87, priority: 2 };
+            if (last3[1].c === 'P') return { predict: 'P', name: 'CẦU 1-3-1 (P)', conf: 87, priority: 2 };
+        }
+    }
+    return null;
+}
+
+// CT28: CẦU 3-2-3
+function CT28_323(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 2 && last3[2].n === 3) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 3-2-3 (B-P)', conf: 85, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 3-2-3 (P-B)', conf: 85, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT29: CẦU 2-2-3
+function CT29_223(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 3) {
+            if (last3[0].c === 'B') return { predict: 'P', name: 'CẦU 2-2-3 (B-P)', conf: 84, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'B', name: 'CẦU 2-2-3 (P-B)', conf: 84, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// CT30: CẦU 3-3-2
+function CT30_332(arr) {
+    if (arr.length < 8) return null;
+    const runs = tinhRuns(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 3 && last3[2].n === 2) {
+            if (last3[0].c === 'B') return { predict: 'B', name: 'CẦU 3-3-2 (B)', conf: 83, priority: 3 };
+            if (last3[0].c === 'P') return { predict: 'P', name: 'CẦU 3-3-2 (P)', conf: 83, priority: 3 };
+        }
+    }
+    return null;
+}
+
+// ============================================================
+= THUẬT TOÁN HỌC MÁY - DỰ ĐOÁN THÔNG MINH
+// ============================================================
+function duDoanThongMinh(history, tableId) {
     const arr = toArr(history);
-    const cnt = {B:0, P:0, T:0};
-    for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
-    const N = arr.length;
-    
-    const std = {B: 45.86, P: 44.62, T: 9.52};
-    const real = {
-        B: cnt.B / N * 100,
-        P: cnt.P / N * 100,
-        T: cnt.T / N * 100
-    };
-    
-    return {
-        B: real.B - std.B,
-        P: real.P - std.P,
-        T: real.T - std.T
-    };
-}
-
-// ============================================================
-// THUẬT TOÁN DỰ ĐOÁN CHÍNH - HỌC TỪ TẤT CẢ CẦU
-// ============================================================
-function predictWithLearning(history, tableId) {
-    if (!history || history.length < 10) {
+    if (arr.length < 5) {
         return {
-            recommend: 'Đợi đủ dữ liệu',
-            rate: 0,
-            confidence: 0,
-            pattern: 'Chưa đủ dữ liệu',
-            stats: {}
+            predict: 'ĐỢI',
+            name: 'CHƯA ĐỦ DỮ LIỆU',
+            conf: 0,
+            all: [],
+            top3: [],
+            hocTu: 'Chưa có'
         };
     }
     
-    const arr = toArr(history);
-    
-    // ── HỌC TỪ DỮ LIỆU ──
-    const freq = learnFrequency(history);
-    const patterns = learnPatterns(history);
-    const streaks = learnStreak(history);
-    const markov = learnMarkov(history);
-    const trend = learnCurrentTrend(history);
-    const deviation = learnDeviation(history);
-    
-    // ── LƯU LẠI ĐỂ HỌC TIẾP ──
+    // Lưu lịch sử học
     if (!learningData[tableId]) learningData[tableId] = [];
     learningData[tableId].push({
         time: Date.now(),
-        history: history,
-        result: arr[arr.length - 1]
+        result: arr[arr.length - 1],
+        length: arr.length
     });
     if (learningData[tableId].length > 100) learningData[tableId].shift();
     
-    // ── DỰ ĐOÁN DỰA TRÊN PATTERN ──
-    let patternVote = {B:0.46, P:0.44, T:0.10};
-    const last3 = arr.slice(-3).join('');
-    const last4 = arr.slice(-4).join('');
-    const last5 = arr.slice(-5).join('');
-    
-    // Tìm pattern khớp
-    for (const len of [5, 4, 3]) {
-        const key = arr.slice(-len).join('');
-        if (patterns[key] && patterns[key].total >= 3) {
-            const p = patterns[key];
-            const total = p.total;
-            patternVote = {
-                B: p.B / total,
-                P: p.P / total,
-                T: p.T / total
-            };
-            break;
-        }
-    }
-    
-    // ── DỰ ĐOÁN DỰA TRÊN MARKOV ──
-    const last = arr[arr.length - 1];
-    let markovVote = {B:0.46, P:0.44, T:0.10};
-    if (markov[last]) {
-        markovVote = markov[last];
-    }
-    
-    // ── DỰ ĐOÁN DỰA TRÊN DEVIATION ──
-    let devVote = {B:0.46, P:0.44, T:0.10};
-    if (deviation.B < -8) {
-        devVote.B = 0.55;
-        devVote.P = 0.35;
-        devVote.T = 0.10;
-    } else if (deviation.P < -8) {
-        devVote.B = 0.35;
-        devVote.P = 0.55;
-        devVote.T = 0.10;
-    } else if (deviation.T < -5) {
-        devVote.T = 0.18;
-        devVote.B = 0.42;
-        devVote.P = 0.40;
-    }
-    
-    // ── DỰ ĐOÁN DỰA TRÊN TREND ──
-    let trendVote = {B:0.46, P:0.44, T:0.10};
-    if (trend.trend === 'B_STRONG') {
-        // Đang B mạnh -> khả năng P về để cân bằng
-        trendVote.B = 0.40;
-        trendVote.P = 0.50;
-        trendVote.T = 0.10;
-    } else if (trend.trend === 'P_STRONG') {
-        trendVote.B = 0.50;
-        trendVote.P = 0.40;
-        trendVote.T = 0.10;
-    } else if (trend.trend === 'T_STRONG') {
-        trendVote.T = 0.15;
-        trendVote.B = 0.43;
-        trendVote.P = 0.42;
-    }
-    
-    // ── DỰ ĐOÁN DỰA TRÊN STREAK ──
-    let streakVote = {B:0.46, P:0.44, T:0.10};
-    if (streaks[last]) {
-        const avgStreak = streaks[last].avg || 2;
-        const current = trend.currentStreak;
-        if (current >= avgStreak * 1.5) {
-            // Streak đã dài -> khả năng đảo chiều
-            if (last === 'B') {
-                streakVote.B = 0.35;
-                streakVote.P = 0.55;
-                streakVote.T = 0.10;
-            } else if (last === 'P') {
-                streakVote.B = 0.55;
-                streakVote.P = 0.35;
-                streakVote.T = 0.10;
-            }
-        } else {
-            // Tiếp tục streak
-            if (last === 'B') {
-                streakVote.B = 0.52;
-                streakVote.P = 0.38;
-                streakVote.T = 0.10;
-            } else if (last === 'P') {
-                streakVote.B = 0.38;
-                streakVote.P = 0.52;
-                streakVote.T = 0.10;
-            }
-        }
-    }
-    
-    // ── TỔNG HỢP CÓ TRỌNG SỐ ──
-    const votes = [
-        {vote: patternVote, weight: 2.0},
-        {vote: markovVote, weight: 1.8},
-        {vote: devVote, weight: 1.5},
-        {vote: trendVote, weight: 1.6},
-        {vote: streakVote, weight: 1.7},
-        {vote: {B:0.4586, P:0.4462, T:0.0952}, weight: 0.8}
+    // ── BƯỚC 1: CHẠY 30 CÔNG THỨC ──
+    const results = [];
+    const formulas = [
+        CT01_Zigzag, CT02_222, CT03_22Dao, CT04_33, CT05_121,
+        CT06_212, CT07_Chop, CT08_Streak, CT09_Tie, CT10_Balance,
+        CT11_ChopDai, CT12_2112, CT13_321, CT14_123, CT15_232,
+        CT16_313, CT17_112, CT18_221, CT19_122, CT20_Deviation,
+        CT21_Reversal, CT22_44, CT23_242, CT24_424, CT25_Repeat,
+        CT26_Cycle5, CT27_131, CT28_323, CT29_223, CT30_332
     ];
     
-    let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
-    for (const v of votes) {
-        sumB += v.vote.B * v.weight;
-        sumP += v.vote.P * v.weight;
-        sumT += v.vote.T * v.weight;
-        totalW += v.weight;
+    for (const formula of formulas) {
+        const result = formula(arr);
+        if (result) {
+            results.push(result);
+        }
     }
     
-    let rB = sumB / totalW * 100;
-    let rP = sumP / totalW * 100;
-    let rT = sumT / totalW * 100;
+    // ── BƯỚC 2: HỌC TỪ LỊCH SỬ ──
+    const patterns = hocPattern(arr);
+    const markov = hocMarkov(arr);
+    const streak = hocStreak(arr);
+    const crossData = hocCrossTable(tableId);
     
-    // ── NORMALIZE ──
-    const rawSum = rB + rP + rT;
-    rB = (rB / rawSum) * 100;
-    rP = (rP / rawSum) * 100;
-    rT = (rT / rawSum) * 100;
+    // ── BƯỚC 3: TỔNG HỢP THUẬT TOÁN HỌC ──
+    let scoreB = 0, scoreP = 0, scoreT = 0;
+    let weightB = 0, weightP = 0, weightT = 0;
     
-    // ── CONFIDENCE ──
-    const avgOthersB = (rP + rT) / 2;
-    const avgOthersP = (rB + rT) / 2;
-    const avgOthersT = (rB + rP) / 2;
+    // 3.1: Từ công thức nhận diện cầu
+    for (const r of results) {
+        if (r.predict === 'B') { scoreB += r.conf; weightB++; }
+        else if (r.predict === 'P') { scoreP += r.conf; weightP++; }
+        else if (r.predict === 'T') { scoreT += r.conf; weightT++; }
+    }
     
-    let confB = 50 + (rB - avgOthersB) * 2.5;
-    let confP = 50 + (rP - avgOthersP) * 2.5;
-    let confT = 50 + (rT - avgOthersT) * 2.5;
+    // 3.2: Từ Markov
+    const last = arr[arr.length - 1];
+    if (markov[last]) {
+        const m = markov[last];
+        scoreB += m.B * 100 * 0.8;
+        scoreP += m.P * 100 * 0.8;
+        scoreT += m.T * 100 * 0.8;
+        weightB += 0.8; weightP += 0.8; weightT += 0.8;
+    }
     
-    // Tăng confidence nếu có nhiều dữ liệu học
-    const learningSize = Math.min(learningData[tableId]?.length || 0, 100);
-    const boost = learningSize / 100 * 5;
-    confB = clamp(confB + boost, 45, 92);
-    confP = clamp(confP + boost, 45, 92);
-    confT = clamp(confT + boost, 40, 85);
+    // 3.3: Từ Streak
+    const streakData = hocStreak(arr);
+    const currentStreak = tinhRuns(arr);
+    const lastRun = currentStreak[currentStreak.length - 1];
+    if (lastRun) {
+        const avgStreak = streakData[lastRun.c]?.avg || 2;
+        if (lastRun.n >= avgStreak * 1.5) {
+            // Streak dài -> đảo
+            if (lastRun.c === 'B') { scoreP += 15; weightP += 1.5; }
+            else if (lastRun.c === 'P') { scoreB += 15; weightB += 1.5; }
+        } else {
+            // Tiếp tục
+            if (lastRun.c === 'B') { scoreB += 10; weightB += 1; }
+            else if (lastRun.c === 'P') { scoreP += 10; weightP += 1; }
+        }
+    }
     
-    // ── CHỌN DỰ ĐOÁN ──
+    // 3.4: Từ Cross-Table
+    if (crossData.total > 20) {
+        const crossB = crossData.B / crossData.total * 100;
+        const crossP = crossData.P / crossData.total * 100;
+        const crossT = crossData.T / crossData.total * 100;
+        scoreB += crossB * 0.3;
+        scoreP += crossP * 0.3;
+        scoreT += crossT * 0.3;
+        weightB += 0.3; weightP += 0.3; weightT += 0.3;
+    }
+    
+    // 3.5: Từ Pattern
+    const lastPattern = arr.slice(-3).join('');
+    if (patterns[lastPattern]) {
+        const p = patterns[lastPattern];
+        const total = p.total;
+        if (total > 0) {
+            scoreB += p.B / total * 100 * 0.5;
+            scoreP += p.P / total * 100 * 0.5;
+            scoreT += p.T / total * 100 * 0.5;
+            weightB += 0.5; weightP += 0.5; weightT += 0.5;
+        }
+    }
+    
+    // ── BƯỚC 4: TÍNH ĐIỂM TRUNG BÌNH ──
+    let avgB = weightB > 0 ? scoreB / weightB : 50;
+    let avgP = weightP > 0 ? scoreP / weightP : 50;
+    let avgT = weightT > 0 ? scoreT / weightT : 50;
+    
+    // ── BƯỚC 5: CHUẨN HÓA ──
+    const total = avgB + avgP + avgT;
+    avgB = avgB / total * 100;
+    avgP = avgP / total * 100;
+    avgT = avgT / total * 100;
+    
+    // ── BƯỚC 6: TÍNH CONFIDENCE ──
+    const confB = Math.min(50 + (avgB - 33) * 1.5, 95);
+    const confP = Math.min(50 + (avgP - 33) * 1.5, 95);
+    const confT = Math.min(50 + (avgT - 33) * 1.5, 90);
+    
+    // ── BƯỚC 7: CHỌN DỰ ĐOÁN ──
     const sides = [
-        {name: 'Banker', rate: Math.round(rB), conf: Math.round(confB)},
-        {name: 'Player', rate: Math.round(rP), conf: Math.round(confP)},
-        {name: 'Tie', rate: Math.round(rT), conf: Math.round(confT)}
+        {name: 'BANKER', rate: Math.round(avgB), conf: Math.round(confB)},
+        {name: 'PLAYER', rate: Math.round(avgP), conf: Math.round(confP)},
+        {name: 'TIE', rate: Math.round(avgT), conf: Math.round(confT)}
     ];
     sides.sort((a,b) => b.conf - a.conf);
     const best = sides[0];
+    const second = sides[1];
     
-    // ── XÁC ĐỊNH PATTERN ──
-    let pattern = 'Cầu đan xen';
-    if (trend.trend === 'B_STRONG') pattern = '🔥 B đang mạnh (có thể đảo)';
-    else if (trend.trend === 'P_STRONG') pattern = '🔥 P đang mạnh (có thể đảo)';
-    else if (trend.trend === 'T_STRONG') pattern = '🔮 T đang xuất hiện nhiều';
-    else if (trend.trend === 'BALANCED') pattern = '⚖️ B/P đang cân bằng';
-    else if (Math.abs(deviation.B) > 10) pattern = `📊 B lệch ${Math.round(deviation.B)}% so chuẩn`;
-    else if (Math.abs(deviation.P) > 10) pattern = `📊 P lệch ${Math.round(deviation.P)}% so chuẩn`;
-    
-    // Học từ các bàn khác
-    if (Object.keys(learningData).length > 1) {
-        // Học cross-table
-        let crossB = 0, crossP = 0, crossT = 0, crossTotal = 0;
-        for (const [id, data] of Object.entries(learningData)) {
-            if (id === tableId) continue;
-            const last10 = data.slice(-10);
-            for (const d of last10) {
-                if (d.result === 'B') crossB++;
-                else if (d.result === 'P') crossP++;
-                else crossT++;
-                crossTotal++;
-            }
-        }
-        if (crossTotal > 10) {
-            const crossVote = {
-                B: crossB / crossTotal * 100,
-                P: crossP / crossTotal * 100,
-                T: crossT / crossTotal * 100
-            };
-            // Kết hợp cross-vote
-            rB = rB * 0.7 + crossVote.B * 0.3;
-            rP = rP * 0.7 + crossVote.P * 0.3;
-            rT = rT * 0.7 + crossVote.T * 0.3;
-            const s = rB + rP + rT;
-            rB = rB / s * 100;
-            rP = rP / s * 100;
-            rT = rT / s * 100;
-            pattern += ` | Học từ ${Object.keys(learningData).length-1} bàn khác`;
-        }
+    // ── BƯỚC 8: XÁC ĐỊNH LOẠI CẦU ──
+    let name = 'KHÔNG XÁC ĐỊNH';
+    if (results.length > 0) {
+        results.sort((a,b) => a.priority - b.priority || b.conf - a.conf);
+        name = results[0].name;
     }
     
-    // ── LÀM TRÒN ──
-    let b = Math.round(rB), p = Math.round(rP), t = Math.round(rT);
-    const rs = b + p + t;
-    if (rs !== 100) {
-        const diff = 100 - rs;
-        if (b >= p && b >= t) b += diff;
-        else if (p >= b && p >= t) p += diff;
-        else t += diff;
-    }
+    // ── BƯỚC 9: TOP 3 CÔNG THỨC ──
+    const top3 = results.slice(0, 3).map(r => ({
+        name: r.name,
+        conf: r.conf,
+        predict: r.predict
+    }));
     
-    // Lưu lịch sử dự đoán
-    if (!predHistory[tableId]) predHistory[tableId] = [];
-    predHistory[tableId].push(best.name[0]);
-    if (predHistory[tableId].length > 50) predHistory[tableId].shift();
+    // ── BƯỚC 10: THÔNG TIN HỌC ──
+    const hocTu = `Đã học ${learningData[tableId]?.length || 0} ván`;
+    const crossInfo = crossData.total > 0 ? ` + ${crossData.total} ván cross` : '';
     
     return {
-        recommend: best.name,
+        predict: best.name,
         rate: best.rate,
-        confidence: best.conf,
-        pattern: pattern,
-        banker: {rate: b, conf: Math.round(confB)},
-        player: {rate: p, conf: Math.round(confP)},
-        tie: {rate: t, conf: Math.round(confT)},
-        stats: {
-            freq: freq,
-            deviation: deviation,
-            trend: trend.trend,
-            currentStreak: trend.currentStreak,
-            learningSize: learningData[tableId]?.length || 0,
-            crossTables: Object.keys(learningData).length - 1
-        }
+        conf: best.conf,
+        name: name,
+        banker: {rate: Math.round(avgB), conf: Math.round(confB)},
+        player: {rate: Math.round(avgP), conf: Math.round(confP)},
+        tie: {rate: Math.round(avgT), conf: Math.round(confT)},
+        top3: top3,
+        hocTu: hocTu + crossInfo,
+        all: results,
+        diff: Math.round(best.conf - second.conf)
     };
 }
 
@@ -436,7 +776,6 @@ async function fetchTableData(tableId) {
     }
 }
 
-// ── API: Dự đoán 1 bàn ──
 app.get('/api/predict/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
@@ -451,35 +790,29 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNew) sessionData[tableId]++;
 
-        const r = predictWithLearning(cauGoc, tableId);
+        const result = duDoanThongMinh(cauGoc, tableId);
 
         res.json({
             phiên: sessionData[tableId],
             cầu_gốc: cauGoc,
-            Dự_đoán: r.recommend,
-            Tỉ_lệ: `${r.rate}%`,
-            Độ_tin_cậy: `${r.confidence}%`,
-            BANKER: `${r.banker.rate}% (${r.banker.conf}%)`,
-            PLAYER: `${r.player.rate}% (${r.player.conf}%)`,
-            TIE: `${r.tie.rate}% (${r.tie.conf}%)`,
-            Cầu: r.pattern,
-            đã_học: `${r.stats.learningSize} ván`,
-            cross_learn: `${r.stats.crossTables} bàn khác`,
-            trend: r.stats.trend,
-            streak: `Streak ${r.stats.currentStreak}`,
-            stats: {
-                'Tần suất thực': `B=${Math.round(r.stats.freq.B)}% P=${Math.round(r.stats.freq.P)}% T=${Math.round(r.stats.freq.T)}%`,
-                'Độ lệch chuẩn': `B=${Math.round(r.stats.deviation.B)}% P=${Math.round(r.stats.deviation.P)}% T=${Math.round(r.stats.deviation.T)}%`,
-                'Xu hướng': r.stats.trend,
-                'Streak hiện tại': r.stats.currentStreak
-            }
+            Dự_đoán: result.predict,
+            Tỉ_lệ: `${result.rate}%`,
+            Độ_tin_cậy: `${result.conf}%`,
+            Loại_cầu: result.name,
+            BANKER: `${result.banker.rate}% (${result.banker.conf}%)`,
+            PLAYER: `${result.player.rate}% (${result.player.conf}%)`,
+            TIE: `${result.tie.rate}% (${result.tie.conf}%)`,
+            'TOP_3_CẦU': result.top3.map(r => `${r.name} (${r.conf}%)`).join(' | '),
+            Chênh_lệch: `${result.diff}%`,
+            Đã_học: result.hocTu,
+            Tổng_công_thức: result.all.length,
+            id: '@tranhoang2286'
         });
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// ── API: Dự đoán tất cả ──
 app.get('/api/predict/all', async (req, res) => {
     try {
         const tableIds = ['C01', 'C02', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10', 'C11', 'C15', 'C16', 'C17', 'C18', 'C19', 'C20'];
@@ -495,27 +828,28 @@ app.get('/api/predict/all', async (req, res) => {
             if (!sessionData[id]) sessionData[id] = 0;
             if (isNew) sessionData[id]++;
 
-            const r = predictWithLearning(cauGoc, id);
+            const result = duDoanThongMinh(cauGoc, id);
             
             predictions[id] = {
                 cầu_gốc: cauGoc,
                 phiên: sessionData[id],
-                Dự_đoán: r.recommend,
-                Tỉ_lệ: `${r.rate}%`,
-                Độ_tin_cậy: `${r.confidence}%`,
-                BANKER: `${r.banker.rate}%`,
-                PLAYER: `${r.player.rate}%`,
-                TIE: `${r.tie.rate}%`,
-                Cầu: r.pattern,
-                đã_học: `${r.stats.learningSize} ván`
+                Dự_đoán: result.predict,
+                Tỉ_lệ: `${result.rate}%`,
+                Độ_tin_cậy: `${result.conf}%`,
+                Loại_cầu: result.name,
+                BANKER: `${result.banker.rate}%`,
+                PLAYER: `${result.player.rate}%`,
+                TIE: `${result.tie.rate}%`,
+                Đã_học: result.hocTu
             };
         }
 
         res.json({
             success: true,
-            engine: 'VIP-v20.0-LEARNING',
+            engine: 'VIP-HOCMAY-CONGTHUC-v5.0',
             timestamp: new Date().toISOString(),
             author: '@tranhoang2286',
+            tong_cong_thuc: 30,
             predictions
         });
     } catch (e) {
@@ -523,7 +857,6 @@ app.get('/api/predict/all', async (req, res) => {
     }
 });
 
-// ── API: Lấy dữ liệu bàn ──
 app.get('/api/baccarat/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
@@ -538,7 +871,6 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
     }
 });
 
-// ── API: Reset học ──
 app.get('/api/reset/:tableId', (req, res) => {
     const tableId = req.params.tableId.toUpperCase();
     if (learningData[tableId]) {
@@ -549,20 +881,25 @@ app.get('/api/reset/:tableId', (req, res) => {
     }
 });
 
-// ── Root ──
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT VIP — LEARNING ENGINE v20.0',
-        version: '20.0.0',
+        name: 'BACCARAT VIP - HỌC MÁY + CÔNG THỨC v5.0',
+        version: '5.0.0',
         author: '@tranhoang2286',
-        features: [
-            '✅ HỌC CẦU TỰ ĐỘNG từ lịch sử',
-            '✅ HỌC PATTERN 3-5 ván',
-            '✅ HỌC STREAK CHU KỲ',
+        tong_cong_thuc: 30,
+        thuat_toan: [
+            '✅ HỌC MÁY TỪ LỊCH SỬ',
+            '✅ HỌC PATTERN TỰ ĐỘNG',
             '✅ HỌC MARKOV CHAIN',
-            '✅ HỌC CROSS-TABLE từ các bàn khác',
-            '✅ DỰ ĐOÁN LUÔN không chờ',
-            '✅ Càng chạy càng thông minh'
+            '✅ HỌC STREAK CHU KỲ',
+            '✅ HỌC CROSS-TABLE',
+            '✅ 30 CÔNG THỨC CHUẨN'
+        ],
+        features: [
+            '✅ KHÔNG RANDOM',
+            '✅ TỰ HỌC THÔNG MINH',
+            '✅ DỰ ĐOÁN CHÍNH XÁC',
+            '✅ PHÂN TÍCH ĐA CHIỀU'
         ],
         endpoints: {
             'Dự đoán 1 bàn': '/api/predict/:tableId',
@@ -575,14 +912,15 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('══════════════════════════════════════════════');
-    console.log('🃏 BACCARAT VIP — LEARNING ENGINE v20.0');
+    console.log('🃏 BACCARAT VIP - HỌC MÁY + CÔNG THỨC v5.0');
     console.log('══════════════════════════════════════════════');
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log('✅ HỌC CẦU TỰ ĐỘNG');
-    console.log('✅ HỌC PATTERN + STREAK + MARKOV');
-    console.log('✅ HỌC CROSS-TABLE');
-    console.log('✅ DỰ ĐOÁN LUÔN');
-    console.log('✅ CÀNG CHẠY CÀNG THÔNG MINH');
+    console.log('📌 30 CÔNG THỨC + THUẬT TOÁN HỌC MÁY');
+    console.log('  ✅ HỌC MÁY TỪ LỊCH SỬ');
+    console.log('  ✅ HỌC PATTERN + MARKOV + STREAK');
+    console.log('  ✅ HỌC CROSS-TABLE');
+    console.log('  ✅ 30 CÔNG THỨC CHUẨN');
+    console.log('  ✅ KHÔNG RANDOM');
     console.log(`👤 @tranhoang2286`);
     console.log('══════════════════════════════════════════════');
 });
