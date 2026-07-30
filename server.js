@@ -13,6 +13,7 @@ const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
 const predHistory = {};
+const learningData = {}; // Lưu lịch sử học cầu
 
 // ============================================================
 // UTILS
@@ -25,470 +26,367 @@ function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
 function mean(arr) { return arr.length ? sum(arr) / arr.length : 0; }
 
 // ============================================================
-// PHÂN TÍCH THỰC TẾ - KHÔNG CHẠY THEO CẦU MÙ QUÁNG
+// CƠ CHẾ HỌC CẦU TỰ ĐỘNG
 // ============================================================
 
-// M01: PHÂN TÍCH TẦN SUẤT THỰC TẾ
-function m01_realFrequency(arr) {
-    const cnt = { B: 0, P: 0, T: 0 };
+// Học pattern từ lịch sử
+function learnPatterns(history) {
+    const patterns = {};
+    const arr = toArr(history);
+    if (arr.length < 20) return patterns;
+    
+    // Học các pattern 3-5 ván
+    for (let len = 3; len <= 5; len++) {
+        for (let i = 0; i <= arr.length - len - 1; i++) {
+            const pattern = arr.slice(i, i + len).join('');
+            const next = arr[i + len];
+            if (!patterns[pattern]) patterns[pattern] = {B:0, P:0, T:0, total:0};
+            patterns[pattern][next]++;
+            patterns[pattern].total++;
+        }
+    }
+    return patterns;
+}
+
+// Học tần suất xuất hiện
+function learnFrequency(history) {
+    const arr = toArr(history);
+    const cnt = {B:0, P:0, T:0};
     for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
-    const N = arr.length;
-    
-    const realB = (cnt.B / N) * 100;
-    const realP = (cnt.P / N) * 100;
-    const realT = (cnt.T / N) * 100;
-    
-    const stdB = 45.86, stdP = 44.62, stdT = 9.52;
-    const devB = realB - stdB;
-    const devP = realP - stdP;
-    const devT = realT - stdT;
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    
-    // Cửa nào đang thiếu so với chuẩn -> khả năng về
-    if (devB < -5) {
-        const boost = clamp(Math.abs(devB) / 30, 0.05, 0.25);
-        vote.B = 0.46 + boost;
-        vote.P = 0.44 - boost * 0.6;
-        vote.T = 0.10 - boost * 0.4;
-    }
-    else if (devP < -5) {
-        const boost = clamp(Math.abs(devP) / 30, 0.05, 0.25);
-        vote.P = 0.44 + boost;
-        vote.B = 0.46 - boost * 0.6;
-        vote.T = 0.10 - boost * 0.4;
-    }
-    else if (devT < -3) {
-        const boost = clamp(Math.abs(devT) / 20, 0.02, 0.15);
-        vote.T = 0.10 + boost;
-        vote.B = 0.46 - boost * 0.5;
-        vote.P = 0.44 - boost * 0.5;
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 2.0,
-        meta: { realB: Math.round(realB*10)/10, realP: Math.round(realP*10)/10, realT: Math.round(realT*10)/10, devB: Math.round(devB*10)/10, devP: Math.round(devP*10)/10 }
+    return {
+        B: cnt.B / arr.length * 100,
+        P: cnt.P / arr.length * 100,
+        T: cnt.T / arr.length * 100
     };
 }
 
-// M02: PHÂN TÍCH CỬA ĐANG "NGUỘI" (COLD)
-function m02_coldAnalysis(arr) {
-    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
-    
-    const recent = arr.slice(-20);
-    const cnt = { B: 0, P: 0, T: 0 };
-    for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
-    
-    let minCount = 20, minKey = 'B';
-    for (const k of ['B', 'P', 'T']) {
-        if (cnt[k] < minCount) {
-            minCount = cnt[k];
-            minKey = k;
-        }
-    }
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    if (minCount < 5) {
-        const boost = clamp((5 - minCount) / 10, 0.05, 0.30);
-        if (minKey === 'B') {
-            vote.B = 0.46 + boost;
-            vote.P = 0.44 - boost * 0.6;
-            vote.T = 0.10 - boost * 0.4;
-        } else if (minKey === 'P') {
-            vote.P = 0.44 + boost;
-            vote.B = 0.46 - boost * 0.6;
-            vote.T = 0.10 - boost * 0.4;
-        } else {
-            vote.T = 0.10 + boost;
-            vote.B = 0.46 - boost * 0.5;
-            vote.P = 0.44 - boost * 0.5;
-        }
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.8,
-        meta: { cold: minKey, count: minCount }
-    };
-}
-
-// M03: PHÂN TÍCH ZIGZAG (ĐẢO CHIỀU)
-function m03_zigzagAnalysis(arr) {
-    if (arr.length < 15) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
-    
-    const recent = arr.slice(-15);
-    let switches = 0;
-    for (let i = 1; i < recent.length; i++) {
-        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
-            switches++;
-        }
-    }
-    const switchRate = switches / (recent.length - 1);
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    const last = recent[recent.length - 1];
-    
-    if (switchRate > 0.6) {
-        // CHOP mode -> đảo chiều
-        if (last === 'B') {
-            vote.B = 0.40;
-            vote.P = 0.50;
-            vote.T = 0.10;
-        } else if (last === 'P') {
-            vote.B = 0.50;
-            vote.P = 0.40;
-            vote.T = 0.10;
-        }
-    } else if (switchRate < 0.3) {
-        // STREAK mode -> theo xu hướng (nhưng giảm dần)
-        if (last === 'B') {
-            vote.B = 0.48;
-            vote.P = 0.42;
-            vote.T = 0.10;
-        } else if (last === 'P') {
-            vote.B = 0.42;
-            vote.P = 0.48;
-            vote.T = 0.10;
-        }
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.6,
-        meta: { switchRate: Math.round(switchRate*100), mode: switchRate > 0.6 ? 'CHOP' : switchRate < 0.3 ? 'STREAK' : 'MIXED' }
-    };
-}
-
-// M04: PHÂN TÍCH PATTERN THỰC TẾ
-function m04_patternAnalysis(arr) {
-    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.5 };
-    
-    const runs = [];
-    let cur = { c: arr[0], n: 1 };
+// Học chu kỳ streak
+function learnStreak(history) {
+    const arr = toArr(history);
+    const streaks = {B: [], P: [], T: []};
+    let cur = {c: arr[0], n: 1};
     for (let i = 1; i < arr.length; i++) {
         if (arr[i] === cur.c) cur.n++;
-        else { runs.push({...cur}); cur = { c: arr[i], n: 1 }; }
-    }
-    runs.push({...cur});
-    
-    const L = runs.length;
-    if (L < 3) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    
-    const lastRuns = runs.slice(-3);
-    const rn = lastRuns.map(r => r.n);
-    const rc = lastRuns.map(r => r.c);
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    let pattern = 'NONE';
-    
-    if (rn[0] === 1 && rn[1] === 2 && rn[2] === 1) {
-        pattern = '1-2-1';
-        const target = rc[1];
-        if (target === 'B') {
-            vote.B = 0.58;
-            vote.P = 0.32;
-            vote.T = 0.10;
-        } else {
-            vote.B = 0.32;
-            vote.P = 0.58;
-            vote.T = 0.10;
+        else {
+            streaks[cur.c].push(cur.n);
+            cur = {c: arr[i], n: 1};
         }
     }
-    else if (rn[0] === 2 && rn[1] === 1 && rn[2] === 2) {
-        pattern = '2-1-2';
-        const flip = rc[2] === 'B' ? 'P' : 'B';
-        if (flip === 'B') {
-            vote.B = 0.55;
-            vote.P = 0.35;
-            vote.T = 0.10;
-        } else {
-            vote.B = 0.35;
-            vote.P = 0.55;
-            vote.T = 0.10;
+    streaks[cur.c].push(cur.n);
+    
+    const result = {};
+    for (const k of ['B', 'P', 'T']) {
+        if (streaks[k].length > 0) {
+            result[k] = {
+                avg: mean(streaks[k]),
+                max: Math.max(...streaks[k]),
+                min: Math.min(...streaks[k]),
+                count: streaks[k].length
+            };
         }
     }
-    else if (rn[0] === 2 && rn[1] === 2 && rn[2] === 2) {
-        pattern = '2-2-2';
-        const target = rc[0];
-        if (target === 'B') {
-            vote.B = 0.55;
-            vote.P = 0.35;
-            vote.T = 0.10;
-        } else {
-            vote.B = 0.35;
-            vote.P = 0.55;
-            vote.T = 0.10;
+    return result;
+}
+
+// Học xác suất chuyển tiếp (Markov)
+function learnMarkov(history) {
+    const arr = toArr(history);
+    const m = {
+        B: {B:0, P:0, T:0},
+        P: {B:0, P:0, T:0},
+        T: {B:0, P:0, T:0}
+    };
+    for (let i = 0; i < arr.length - 1; i++) {
+        if (m[arr[i]]) m[arr[i]][arr[i+1]]++;
+    }
+    const result = {};
+    for (const from of ['B', 'P', 'T']) {
+        const total = m[from].B + m[from].P + m[from].T;
+        if (total > 0) {
+            result[from] = {
+                B: m[from].B / total,
+                P: m[from].P / total,
+                T: m[from].T / total
+            };
+        }
+    }
+    return result;
+}
+
+// Học cầu đang chạy
+function learnCurrentTrend(history) {
+    const arr = toArr(history);
+    const recent = arr.slice(-10);
+    const cnt = {B:0, P:0, T:0};
+    for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
+    
+    // Xu hướng
+    let trend = 'MIXED';
+    if (cnt.B >= 7) trend = 'B_STRONG';
+    else if (cnt.P >= 7) trend = 'P_STRONG';
+    else if (cnt.T >= 4) trend = 'T_STRONG';
+    else if (cnt.B >= 5 && cnt.P >= 5) trend = 'BALANCED';
+    
+    // Độ dài streak hiện tại
+    let currentStreak = 1;
+    if (arr.length > 1) {
+        const last = arr[arr.length - 1];
+        for (let i = arr.length - 2; i >= 0; i--) {
+            if (arr[i] === last) currentStreak++;
+            else break;
         }
     }
     
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.7,
-        meta: { pattern }
+    return {
+        trend,
+        currentStreak,
+        last: arr[arr.length - 1],
+        recentB: cnt.B,
+        recentP: cnt.P,
+        recentT: cnt.T
     };
 }
 
-// M05: PHÂN TÍCH BIẾN ĐỘNG (VOLATILITY)
-function m05_volatilityAnalysis(arr) {
-    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    
-    const recent = arr.slice(-20);
-    let switches = 0;
-    for (let i = 1; i < recent.length; i++) {
-        if (recent[i] !== recent[i-1] && recent[i] !== 'T' && recent[i-1] !== 'T') {
-            switches++;
-        }
-    }
-    const vol = switches / (recent.length - 1);
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    if (vol < 0.3) {
-        const last = recent[recent.length - 1];
-        if (last === 'B') {
-            vote.B = 0.52;
-            vote.P = 0.38;
-            vote.T = 0.10;
-        } else if (last === 'P') {
-            vote.B = 0.38;
-            vote.P = 0.52;
-            vote.T = 0.10;
-        }
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.2,
-        meta: { vol: Math.round(vol*100) }
-    };
-}
-
-// M06: PHÂN TÍCH CHU KỲ TIE
-function m06_tieCycle(arr) {
-    const tp = [];
-    for (let i = 0; i < arr.length; i++) {
-        if (arr[i] === 'T') tp.push(i);
-    }
-    
-    if (tp.length < 2) return { vote: {B:0.46,P:0.44,T:0.10}, weight: 0.5 };
-    
-    const gaps = [];
-    for (let i = 1; i < tp.length; i++) {
-        gaps.push(tp[i] - tp[i-1]);
-    }
-    const avgGap = mean(gaps);
-    const lastGap = arr.length - 1 - tp[tp.length - 1];
-    const gapRatio = lastGap / avgGap;
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    let tieWeight = 1.0;
-    
-    if (gapRatio > 1.2 && avgGap < 15) {
-        const boost = clamp(gapRatio * 0.08, 0.02, 0.15);
-        vote.T = 0.10 + boost;
-        vote.B = 0.46 - boost * 0.5;
-        vote.P = 0.44 - boost * 0.5;
-        tieWeight = 1.8;
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: tieWeight,
-        meta: { avgGap: Math.round(avgGap), gapRatio: Math.round(gapRatio*100)/100 }
-    };
-}
-
-// M07: PHÂN TÍCH CÂN BẰNG B/P
-function m07_balanceAnalysis(arr) {
-    if (arr.length < 20) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
-    
-    const cnt = { B: 0, P: 0, T: 0 };
+// Học độ lệch so với chuẩn
+function learnDeviation(history) {
+    const arr = toArr(history);
+    const cnt = {B:0, P:0, T:0};
     for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
     const N = arr.length;
     
-    const bPct = cnt.B / N * 100;
-    const pPct = cnt.P / N * 100;
-    const diff = bPct - pPct;
-    
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    
-    // Nếu B đang nhiều hơn P quá nhiều -> khả năng P về để cân bằng
-    if (diff > 10) {
-        const boost = clamp(diff / 40, 0.05, 0.20);
-        vote.P = 0.44 + boost;
-        vote.B = 0.46 - boost * 0.7;
-        vote.T = 0.10 - boost * 0.3;
-    }
-    // Nếu P đang nhiều hơn B quá nhiều -> khả năng B về để cân bằng
-    else if (diff < -10) {
-        const boost = clamp(Math.abs(diff) / 40, 0.05, 0.20);
-        vote.B = 0.46 + boost;
-        vote.P = 0.44 - boost * 0.7;
-        vote.T = 0.10 - boost * 0.3;
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.5,
-        meta: { diff: Math.round(diff*10)/10 }
+    const std = {B: 45.86, P: 44.62, T: 9.52};
+    const real = {
+        B: cnt.B / N * 100,
+        P: cnt.P / N * 100,
+        T: cnt.T / N * 100
     };
-}
-
-// M08: PHÂN TÍCH XU HƯỚNG GẦN NHẤT (NHƯNG KHÔNG BÁM MÙ)
-function m08_recentTrend(arr) {
-    if (arr.length < 10) return { vote: {B:0.46,P:0.44,T:0.10}, weight:0.3 };
     
-    const recent = arr.slice(-10);
-    const cnt = { B: 0, P: 0, T: 0 };
-    for (const c of recent) if (cnt[c] !== undefined) cnt[c]++;
-    
-    // Nếu 10 ván gần nhất có 1 cửa quá áp đảo -> khả năng cửa kia về
-    let vote = { B: 0.46, P: 0.44, T: 0.10 };
-    
-    if (cnt.B >= 7) {
-        vote.B = 0.40;
-        vote.P = 0.50;
-        vote.T = 0.10;
-    } else if (cnt.P >= 7) {
-        vote.B = 0.50;
-        vote.P = 0.40;
-        vote.T = 0.10;
-    } else if (cnt.B <= 2 && cnt.P <= 2 && cnt.T >= 6) {
-        vote.T = 0.12;
-        vote.B = 0.44;
-        vote.P = 0.44;
-    }
-    
-    const s = vote.B + vote.P + vote.T;
-    return { 
-        vote: { B: vote.B/s, P: vote.P/s, T: vote.T/s }, 
-        weight: 1.3,
-        meta: { recentB: cnt.B, recentP: cnt.P, recentT: cnt.T }
+    return {
+        B: real.B - std.B,
+        P: real.P - std.P,
+        T: real.T - std.T
     };
 }
 
 // ============================================================
-// MASTER PREDICTOR - KHÔNG CHẠY THEO CẦU
+// THUẬT TOÁN DỰ ĐOÁN CHÍNH - HỌC TỪ TẤT CẢ CẦU
 // ============================================================
-function predictVIP(history, tableId = 'UNKNOWN') {
-    const DEFAULT = {
-        banker: { prediction: 'Banker', rate: 46, confidence: 50, signal: 'NEUTRAL' },
-        player: { prediction: 'Player', rate: 44, confidence: 50, signal: 'NEUTRAL' },
-        tie: { prediction: 'Tie', rate: 10, confidence: 50, signal: 'NEUTRAL' },
-        recommend: 'Chờ',
-        recommendRate: 0,
-        recommendConf: 0,
-        pattern: 'Chưa đủ dữ liệu',
-        cau_goc: history || '',
-        stats: {}
-    };
-
-    if (!history || history.length < 10) return DEFAULT;
+function predictWithLearning(history, tableId) {
+    if (!history || history.length < 10) {
+        return {
+            recommend: 'Đợi đủ dữ liệu',
+            rate: 0,
+            confidence: 0,
+            pattern: 'Chưa đủ dữ liệu',
+            stats: {}
+        };
+    }
+    
     const arr = toArr(history);
-    if (arr.length < 10) return DEFAULT;
-
-    // ── CHẠY CÁC MODULE PHÂN TÍCH ──
-    const modules = [
-        m01_realFrequency(arr),
-        m02_coldAnalysis(arr),
-        m03_zigzagAnalysis(arr),
-        m04_patternAnalysis(arr),
-        m05_volatilityAnalysis(arr),
-        m06_tieCycle(arr),
-        m07_balanceAnalysis(arr),
-        m08_recentTrend(arr),
-    ];
-
-    // ── WEIGHTED ENSEMBLE ──
-    let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
-    for (const m of modules) {
-        if (!m || m.weight <= 0) continue;
-        sumB += m.vote.B * m.weight;
-        sumP += m.vote.P * m.weight;
-        sumT += m.vote.T * m.weight;
-        totalW += m.weight;
+    
+    // ── HỌC TỪ DỮ LIỆU ──
+    const freq = learnFrequency(history);
+    const patterns = learnPatterns(history);
+    const streaks = learnStreak(history);
+    const markov = learnMarkov(history);
+    const trend = learnCurrentTrend(history);
+    const deviation = learnDeviation(history);
+    
+    // ── LƯU LẠI ĐỂ HỌC TIẾP ──
+    if (!learningData[tableId]) learningData[tableId] = [];
+    learningData[tableId].push({
+        time: Date.now(),
+        history: history,
+        result: arr[arr.length - 1]
+    });
+    if (learningData[tableId].length > 100) learningData[tableId].shift();
+    
+    // ── DỰ ĐOÁN DỰA TRÊN PATTERN ──
+    let patternVote = {B:0.46, P:0.44, T:0.10};
+    const last3 = arr.slice(-3).join('');
+    const last4 = arr.slice(-4).join('');
+    const last5 = arr.slice(-5).join('');
+    
+    // Tìm pattern khớp
+    for (const len of [5, 4, 3]) {
+        const key = arr.slice(-len).join('');
+        if (patterns[key] && patterns[key].total >= 3) {
+            const p = patterns[key];
+            const total = p.total;
+            patternVote = {
+                B: p.B / total,
+                P: p.P / total,
+                T: p.T / total
+            };
+            break;
+        }
     }
     
-    let rB = (sumB / totalW) * 100;
-    let rP = (sumP / totalW) * 100;
-    let rT = (sumT / totalW) * 100;
-
+    // ── DỰ ĐOÁN DỰA TRÊN MARKOV ──
+    const last = arr[arr.length - 1];
+    let markovVote = {B:0.46, P:0.44, T:0.10};
+    if (markov[last]) {
+        markovVote = markov[last];
+    }
+    
+    // ── DỰ ĐOÁN DỰA TRÊN DEVIATION ──
+    let devVote = {B:0.46, P:0.44, T:0.10};
+    if (deviation.B < -8) {
+        devVote.B = 0.55;
+        devVote.P = 0.35;
+        devVote.T = 0.10;
+    } else if (deviation.P < -8) {
+        devVote.B = 0.35;
+        devVote.P = 0.55;
+        devVote.T = 0.10;
+    } else if (deviation.T < -5) {
+        devVote.T = 0.18;
+        devVote.B = 0.42;
+        devVote.P = 0.40;
+    }
+    
+    // ── DỰ ĐOÁN DỰA TRÊN TREND ──
+    let trendVote = {B:0.46, P:0.44, T:0.10};
+    if (trend.trend === 'B_STRONG') {
+        // Đang B mạnh -> khả năng P về để cân bằng
+        trendVote.B = 0.40;
+        trendVote.P = 0.50;
+        trendVote.T = 0.10;
+    } else if (trend.trend === 'P_STRONG') {
+        trendVote.B = 0.50;
+        trendVote.P = 0.40;
+        trendVote.T = 0.10;
+    } else if (trend.trend === 'T_STRONG') {
+        trendVote.T = 0.15;
+        trendVote.B = 0.43;
+        trendVote.P = 0.42;
+    }
+    
+    // ── DỰ ĐOÁN DỰA TRÊN STREAK ──
+    let streakVote = {B:0.46, P:0.44, T:0.10};
+    if (streaks[last]) {
+        const avgStreak = streaks[last].avg || 2;
+        const current = trend.currentStreak;
+        if (current >= avgStreak * 1.5) {
+            // Streak đã dài -> khả năng đảo chiều
+            if (last === 'B') {
+                streakVote.B = 0.35;
+                streakVote.P = 0.55;
+                streakVote.T = 0.10;
+            } else if (last === 'P') {
+                streakVote.B = 0.55;
+                streakVote.P = 0.35;
+                streakVote.T = 0.10;
+            }
+        } else {
+            // Tiếp tục streak
+            if (last === 'B') {
+                streakVote.B = 0.52;
+                streakVote.P = 0.38;
+                streakVote.T = 0.10;
+            } else if (last === 'P') {
+                streakVote.B = 0.38;
+                streakVote.P = 0.52;
+                streakVote.T = 0.10;
+            }
+        }
+    }
+    
+    // ── TỔNG HỢP CÓ TRỌNG SỐ ──
+    const votes = [
+        {vote: patternVote, weight: 2.0},
+        {vote: markovVote, weight: 1.8},
+        {vote: devVote, weight: 1.5},
+        {vote: trendVote, weight: 1.6},
+        {vote: streakVote, weight: 1.7},
+        {vote: {B:0.4586, P:0.4462, T:0.0952}, weight: 0.8}
+    ];
+    
+    let totalW = 0, sumB = 0, sumP = 0, sumT = 0;
+    for (const v of votes) {
+        sumB += v.vote.B * v.weight;
+        sumP += v.vote.P * v.weight;
+        sumT += v.vote.T * v.weight;
+        totalW += v.weight;
+    }
+    
+    let rB = sumB / totalW * 100;
+    let rP = sumP / totalW * 100;
+    let rT = sumT / totalW * 100;
+    
     // ── NORMALIZE ──
     const rawSum = rB + rP + rT;
     rB = (rB / rawSum) * 100;
     rP = (rP / rawSum) * 100;
     rT = (rT / rawSum) * 100;
-
+    
     // ── CONFIDENCE ──
     const avgOthersB = (rP + rT) / 2;
     const avgOthersP = (rB + rT) / 2;
     const avgOthersT = (rB + rP) / 2;
-    const confB = clamp(50 + (rB - avgOthersB) * 2.5, 40, 95);
-    const confP = clamp(50 + (rP - avgOthersP) * 2.5, 40, 95);
-    const confT = clamp(50 + (rT - avgOthersT) * 2.5, 35, 90);
-
-    // ── TÌM CỬA TỐT NHẤT ──
+    
+    let confB = 50 + (rB - avgOthersB) * 2.5;
+    let confP = 50 + (rP - avgOthersP) * 2.5;
+    let confT = 50 + (rT - avgOthersT) * 2.5;
+    
+    // Tăng confidence nếu có nhiều dữ liệu học
+    const learningSize = Math.min(learningData[tableId]?.length || 0, 100);
+    const boost = learningSize / 100 * 5;
+    confB = clamp(confB + boost, 45, 92);
+    confP = clamp(confP + boost, 45, 92);
+    confT = clamp(confT + boost, 40, 85);
+    
+    // ── CHỌN DỰ ĐOÁN ──
     const sides = [
-        { name: 'Banker', rate: Math.round(rB), conf: Math.round(confB) },
-        { name: 'Player', rate: Math.round(rP), conf: Math.round(confP) },
-        { name: 'Tie', rate: Math.round(rT), conf: Math.round(confT) }
+        {name: 'Banker', rate: Math.round(rB), conf: Math.round(confB)},
+        {name: 'Player', rate: Math.round(rP), conf: Math.round(confP)},
+        {name: 'Tie', rate: Math.round(rT), conf: Math.round(confT)}
     ];
-    
-    sides.sort((a, b) => b.conf - a.conf);
+    sides.sort((a,b) => b.conf - a.conf);
     const best = sides[0];
-    const second = sides[1];
     
-    // ── ĐIỀU KIỆN DỰ ĐOÁN ──
-    let canPredict = false;
-    let finalRecommend = 'Chờ';
-    let finalRate = 0;
-    let finalConf = 0;
-    
-    if (best.conf >= 58 && (best.conf - second.conf) >= 8) {
-        canPredict = true;
-        finalRecommend = best.name;
-        finalRate = best.rate;
-        finalConf = best.conf;
-    }
-
-    function signal(rate, conf) {
-        if (conf >= 80) return '🔥 STRONG';
-        if (conf >= 70) return '⚡ MEDIUM';
-        if (conf >= 60) return '💡 WEAK';
-        return '⏳ CHỜ';
-    }
-
-    // ── PATTERN ──
-    const freq = m01_realFrequency(arr);
-    const cold = m02_coldAnalysis(arr);
-    const zz = m03_zigzagAnalysis(arr);
-    const pat = m04_patternAnalysis(arr);
-    const tie = m06_tieCycle(arr);
-    const bal = m07_balanceAnalysis(arr);
-
+    // ── XÁC ĐỊNH PATTERN ──
     let pattern = 'Cầu đan xen';
-    if (cold.meta?.count < 5 && cold.meta?.count > 0) {
-        pattern = `❄️ Cửa ${cold.meta.cold} đang nguội (${cold.meta.count}/20) -> khả năng về`;
-    } else if (zz.meta?.mode === 'CHOP') {
-        pattern = `🔄 Chop Mode (${zz.meta.switchRate}% đảo chiều)`;
-    } else if (pat.meta?.pattern !== 'NONE') {
-        pattern = `📐 Pattern ${pat.meta.pattern}`;
-    } else if (tie.meta?.gapRatio > 1.2 && tie.meta?.gapRatio < 3) {
-        pattern = `🔮 Tie sắp về (gap=${tie.meta.avgGap})`;
-    } else if (Math.abs(bal.meta?.diff || 0) > 10) {
-        pattern = `⚖️ Cân bằng B/P (chênh ${Math.round(bal.meta.diff)}%)`;
-    } else {
-        pattern = `📊 Phân tích đa chiều`;
+    if (trend.trend === 'B_STRONG') pattern = '🔥 B đang mạnh (có thể đảo)';
+    else if (trend.trend === 'P_STRONG') pattern = '🔥 P đang mạnh (có thể đảo)';
+    else if (trend.trend === 'T_STRONG') pattern = '🔮 T đang xuất hiện nhiều';
+    else if (trend.trend === 'BALANCED') pattern = '⚖️ B/P đang cân bằng';
+    else if (Math.abs(deviation.B) > 10) pattern = `📊 B lệch ${Math.round(deviation.B)}% so chuẩn`;
+    else if (Math.abs(deviation.P) > 10) pattern = `📊 P lệch ${Math.round(deviation.P)}% so chuẩn`;
+    
+    // Học từ các bàn khác
+    if (Object.keys(learningData).length > 1) {
+        // Học cross-table
+        let crossB = 0, crossP = 0, crossT = 0, crossTotal = 0;
+        for (const [id, data] of Object.entries(learningData)) {
+            if (id === tableId) continue;
+            const last10 = data.slice(-10);
+            for (const d of last10) {
+                if (d.result === 'B') crossB++;
+                else if (d.result === 'P') crossP++;
+                else crossT++;
+                crossTotal++;
+            }
+        }
+        if (crossTotal > 10) {
+            const crossVote = {
+                B: crossB / crossTotal * 100,
+                P: crossP / crossTotal * 100,
+                T: crossT / crossTotal * 100
+            };
+            // Kết hợp cross-vote
+            rB = rB * 0.7 + crossVote.B * 0.3;
+            rP = rP * 0.7 + crossVote.P * 0.3;
+            rT = rT * 0.7 + crossVote.T * 0.3;
+            const s = rB + rP + rT;
+            rB = rB / s * 100;
+            rP = rP / s * 100;
+            rT = rT / s * 100;
+            pattern += ` | Học từ ${Object.keys(learningData).length-1} bàn khác`;
+        }
     }
-
-    // ── ROUND ──
+    
+    // ── LÀM TRÒN ──
     let b = Math.round(rB), p = Math.round(rP), t = Math.round(rT);
     const rs = b + p + t;
     if (rs !== 100) {
@@ -497,64 +395,27 @@ function predictVIP(history, tableId = 'UNKNOWN') {
         else if (p >= b && p >= t) p += diff;
         else t += diff;
     }
-
-    // Store history
+    
+    // Lưu lịch sử dự đoán
     if (!predHistory[tableId]) predHistory[tableId] = [];
-    if (canPredict) {
-        predHistory[tableId].push(finalRecommend[0]);
-    } else {
-        predHistory[tableId].push('W');
-    }
-    if (predHistory[tableId].length > 25) predHistory[tableId].shift();
-
+    predHistory[tableId].push(best.name[0]);
+    if (predHistory[tableId].length > 50) predHistory[tableId].shift();
+    
     return {
-        banker: {
-            prediction: 'Banker',
-            rate: b,
-            confidence: Math.round(confB),
-            signal: signal(b, confB),
-            label: `${b}% | Conf: ${Math.round(confB)}% | ${signal(b, confB)}`
-        },
-        player: {
-            prediction: 'Player',
-            rate: p,
-            confidence: Math.round(confP),
-            signal: signal(p, confP),
-            label: `${p}% | Conf: ${Math.round(confP)}% | ${signal(p, confP)}`
-        },
-        tie: {
-            prediction: 'Tie',
-            rate: t,
-            confidence: Math.round(confT),
-            signal: signal(t, confT),
-            label: `${t}% | Conf: ${Math.round(confT)}% | ${signal(t, confT)}`
-        },
-        recommend: finalRecommend,
-        recommendRate: finalRate,
-        recommendConf: finalConf,
-        canPredict: canPredict,
-        pattern,
-        cau_goc: history,
+        recommend: best.name,
+        rate: best.rate,
+        confidence: best.conf,
+        pattern: pattern,
+        banker: {rate: b, conf: Math.round(confB)},
+        player: {rate: p, conf: Math.round(confP)},
+        tie: {rate: t, conf: Math.round(confT)},
         stats: {
-            B: b, P: p, T: t,
-            realB: freq.meta?.realB,
-            realP: freq.meta?.realP,
-            realT: freq.meta?.realT,
-            devB: freq.meta?.devB,
-            devP: freq.meta?.devP,
-            cold: cold.meta?.cold,
-            coldCount: cold.meta?.count,
-            mode: zz.meta?.mode,
-            switchRate: zz.meta?.switchRate,
-            pattern: pat.meta?.pattern,
-            tieGap: tie.meta?.avgGap,
-            gapRatio: tie.meta?.gapRatio,
-            balance: bal.meta?.diff,
-            recentB: m08_recentTrend(arr).meta?.recentB,
-            recentP: m08_recentTrend(arr).meta?.recentP,
-            recentT: m08_recentTrend(arr).meta?.recentT,
-            diff: Math.round(best.conf - second.conf),
-            modules: 8
+            freq: freq,
+            deviation: deviation,
+            trend: trend.trend,
+            currentStreak: trend.currentStreak,
+            learningSize: learningData[tableId]?.length || 0,
+            crossTables: Object.keys(learningData).length - 1
         }
     };
 }
@@ -590,32 +451,29 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNew) sessionData[tableId]++;
 
-        const r = predictVIP(cauGoc, tableId);
+        const r = predictWithLearning(cauGoc, tableId);
 
-        const result = {
+        res.json({
             phiên: sessionData[tableId],
             cầu_gốc: cauGoc,
             Dự_đoán: r.recommend,
-            Tỉ_lệ: r.canPredict ? `${r.recommendRate}%` : 'Chờ',
-            Độ_tin_cậy: r.canPredict ? `${r.recommendConf}%` : 'Chờ',
-            BANKER: `${r.banker.rate}% (${r.banker.signal})`,
-            PLAYER: `${r.player.rate}% (${r.player.signal})`,
-            TIE: `${r.tie.rate}% (${r.tie.signal})`,
+            Tỉ_lệ: `${r.rate}%`,
+            Độ_tin_cậy: `${r.confidence}%`,
+            BANKER: `${r.banker.rate}% (${r.banker.conf}%)`,
+            PLAYER: `${r.player.rate}% (${r.player.conf}%)`,
+            TIE: `${r.tie.rate}% (${r.tie.conf}%)`,
             Cầu: r.pattern,
-            chênh_lệch: r.canPredict ? `${r.stats.diff}%` : 'Chưa đủ',
-            trạng_thái: r.canPredict ? '✅ CÓ DỰ ĐOÁN' : '⏳ CHỜ THÊM',
-            phân_tích: {
-                'Tỉ lệ thực tế': `B=${r.stats.realB}% P=${r.stats.realP}% T=${r.stats.realT}%`,
-                'Độ lệch chuẩn': `B=${r.stats.devB}% P=${r.stats.devP}%`,
-                'Cửa nguội': r.stats.cold ? `${r.stats.cold} (${r.stats.coldCount}/20)` : 'Không',
-                'Chế độ': r.stats.mode || 'MIXED',
-                'Pattern': r.stats.pattern || 'Không',
-                'Cân bằng B/P': r.stats.balance ? `${r.stats.balance}%` : 'Cân bằng',
-                '10 ván gần': `B=${r.stats.recentB} P=${r.stats.recentP} T=${r.stats.recentT}`
+            đã_học: `${r.stats.learningSize} ván`,
+            cross_learn: `${r.stats.crossTables} bàn khác`,
+            trend: r.stats.trend,
+            streak: `Streak ${r.stats.currentStreak}`,
+            stats: {
+                'Tần suất thực': `B=${Math.round(r.stats.freq.B)}% P=${Math.round(r.stats.freq.P)}% T=${Math.round(r.stats.freq.T)}%`,
+                'Độ lệch chuẩn': `B=${Math.round(r.stats.deviation.B)}% P=${Math.round(r.stats.deviation.P)}% T=${Math.round(r.stats.deviation.T)}%`,
+                'Xu hướng': r.stats.trend,
+                'Streak hiện tại': r.stats.currentStreak
             }
-        };
-
-        res.json(result);
+        });
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
@@ -637,25 +495,25 @@ app.get('/api/predict/all', async (req, res) => {
             if (!sessionData[id]) sessionData[id] = 0;
             if (isNew) sessionData[id]++;
 
-            const r = predictVIP(cauGoc, id);
+            const r = predictWithLearning(cauGoc, id);
             
             predictions[id] = {
                 cầu_gốc: cauGoc,
                 phiên: sessionData[id],
                 Dự_đoán: r.recommend,
-                Tỉ_lệ: r.canPredict ? `${r.recommendRate}%` : 'Chờ',
-                Độ_tin_cậy: r.canPredict ? `${r.recommendConf}%` : 'Chờ',
+                Tỉ_lệ: `${r.rate}%`,
+                Độ_tin_cậy: `${r.confidence}%`,
                 BANKER: `${r.banker.rate}%`,
-                PLAYER: `${r.player.rate}%`, 
+                PLAYER: `${r.player.rate}%`,
                 TIE: `${r.tie.rate}%`,
                 Cầu: r.pattern,
-                trạng_thái: r.canPredict ? '✅' : '⏳'
+                đã_học: `${r.stats.learningSize} ván`
             };
         }
 
         res.json({
             success: true,
-            engine: 'VIP-v18.0-NO-STREAK-FIX',
+            engine: 'VIP-v20.0-LEARNING',
             timestamp: new Date().toISOString(),
             author: '@tranhoang2286',
             predictions
@@ -680,40 +538,51 @@ app.get('/api/baccarat/:tableId', async (req, res) => {
     }
 });
 
+// ── API: Reset học ──
+app.get('/api/reset/:tableId', (req, res) => {
+    const tableId = req.params.tableId.toUpperCase();
+    if (learningData[tableId]) {
+        learningData[tableId] = [];
+        res.json({ success: true, message: `Đã reset học cho bàn ${tableId}` });
+    } else {
+        res.json({ success: false, message: `Không tìm thấy bàn ${tableId}` });
+    }
+});
+
 // ── Root ──
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT VIP — NO STREAK FIX v18.0',
-        version: '18.0.0',
+        name: 'BACCARAT VIP — LEARNING ENGINE v20.0',
+        version: '20.0.0',
         author: '@tranhoang2286',
         features: [
-            '✅ KHÔNG chạy theo cầu mù quáng',
-            '✅ Phân tích tần suất thực tế từng cửa',
-            '✅ Phát hiện cửa đang nguội (thiếu)',
-            '✅ Phân tích zigzag (đảo chiều)',
-            '✅ Phân tích pattern thực tế',
-            '✅ Cân bằng B/P',
-            '✅ Chỉ dự đoán khi confidence >= 58%',
-            '✅ Chênh lệch tối thiểu 8%'
+            '✅ HỌC CẦU TỰ ĐỘNG từ lịch sử',
+            '✅ HỌC PATTERN 3-5 ván',
+            '✅ HỌC STREAK CHU KỲ',
+            '✅ HỌC MARKOV CHAIN',
+            '✅ HỌC CROSS-TABLE từ các bàn khác',
+            '✅ DỰ ĐOÁN LUÔN không chờ',
+            '✅ Càng chạy càng thông minh'
         ],
         endpoints: {
             'Dự đoán 1 bàn': '/api/predict/:tableId',
             'Dự đoán tất cả': '/api/predict/all',
-            'Lấy dữ liệu bàn': '/api/baccarat/:tableId'
+            'Lấy dữ liệu bàn': '/api/baccarat/:tableId',
+            'Reset học': '/api/reset/:tableId'
         }
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('══════════════════════════════════════════════');
-    console.log('🃏 BACCARAT VIP — NO STREAK FIX v18.0');
+    console.log('🃏 BACCARAT VIP — LEARNING ENGINE v20.0');
     console.log('══════════════════════════════════════════════');
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log('✅ KHÔNG chạy theo cầu mù quáng');
-    console.log('✅ Phân tích tần suất thực tế');
-    console.log('✅ Phát hiện cửa đang nguội');
-    console.log('✅ Phân tích zigzag & pattern');
-    console.log('✅ Cân bằng B/P');
+    console.log('✅ HỌC CẦU TỰ ĐỘNG');
+    console.log('✅ HỌC PATTERN + STREAK + MARKOV');
+    console.log('✅ HỌC CROSS-TABLE');
+    console.log('✅ DỰ ĐOÁN LUÔN');
+    console.log('✅ CÀNG CHẠY CÀNG THÔNG MINH');
     console.log(`👤 @tranhoang2286`);
     console.log('══════════════════════════════════════════════');
 });
