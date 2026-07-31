@@ -12,606 +12,701 @@ app.use((req, res, next) => {
 const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
-const aiLearningDB = {};
-const accuracyTracker = {};
-
-// ==================== CORE UTILITIES ====================
 
 function toArr(str) {
-    return str ? str.split('').filter(c => ['B','P'].includes(c)) : [];
+    return str ? str.split('').filter(c => ['B','P','T'].includes(c)) : [];
 }
 
 function demTanSuat(arr) {
-    const cnt = {B:0, P:0};
+    const cnt = {B:0, P:0, T:0};
     for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
     const total = arr.length || 1;
     return {
-        B: (cnt.B / total) * 100,
-        P: (cnt.P / total) * 100,
-        total: total,
-        countB: cnt.B,
-        countP: cnt.P
+        B: (cnt.B / total * 100),
+        P: (cnt.P / total * 100),
+        T: (cnt.T / total * 100)
     };
 }
 
 function timChuoi(arr) {
     if (arr.length === 0) return [];
     const runs = [];
-    let cur = {c: arr[0], n: 1, pos: 0};
+    let cur = {c: arr[0], n: 1};
     for (let i = 1; i < arr.length; i++) {
         if (arr[i] === cur.c) cur.n++;
-        else { runs.push({...cur}); cur = {c: arr[i], n: 1, pos: i}; }
+        else { runs.push({...cur}); cur = {c: arr[i], n: 1}; }
     }
     runs.push({...cur});
     return runs;
 }
 
-function chiSquareTest(arr) {
-    const ts = demTanSuat(arr);
-    const expected = 50;
-    const chiSq = 
-        Math.pow(ts.B - expected, 2) / expected +
-        Math.pow(ts.P - expected, 2) / expected;
-    return chiSq;
-}
-
-function ksTest(arr) {
-    const sorted = [...arr].sort();
-    let maxD = 0;
-    for (let i = 0; i < sorted.length; i++) {
-        const empirical = (i + 1) / sorted.length;
-        const theoretical = 0.5;
-        const d = Math.abs(empirical - theoretical);
-        maxD = Math.max(maxD, d);
+// ==================== CÔNG THỨC VIP 1: VỆT DÀI ====================
+function CT_VetDai(arr) {
+    if (arr.length < 3) return null;
+    const runs = timChuoi(arr);
+    const last = runs[runs.length - 1];
+    
+    if (last.n >= 5) {
+        return {
+            predict: last.c === 'B' ? 'P' : 'B',
+            name: `VỆT ${last.c} x${last.n} - ĐẢO`,
+            conf: 92,
+            type: 'VIP'
+        };
     }
-    return maxD;
-}
-
-function calcStdDev(arr) {
-    const ts = demTanSuat(arr);
-    const mean = (ts.B + ts.P) / 2;
-    const variance = (Math.pow(ts.B - mean, 2) + Math.pow(ts.P - mean, 2)) / 2;
-    return Math.sqrt(variance);
-}
-
-function tinhEntropy(arr) {
-    const ts = demTanSuat(arr);
-    const total = ts.total;
-    const p_B = ts.countB / total;
-    const p_P = ts.countP / total;
-    return -((p_B > 0 ? p_B * Math.log2(p_B) : 0) + (p_P > 0 ? p_P * Math.log2(p_P) : 0));
-}
-
-// ==================== ULTRA PRECISION FORMULAS (FIXED) ====================
-
-function F1_PerfectZigzag(arr) {
-    if (arr.length < 7) return null;
-    const last7 = arr.slice(-7);
-    let perfect = true;
-    for (let i = 1; i < 7; i++) {
-        if (last7[i] === last7[i-1]) perfect = false;
+    if (last.n === 4) {
+        return {
+            predict: last.c === 'B' ? 'P' : 'B',
+            name: `VỆT ${last.c} x4 - ĐẢO`,
+            conf: 88,
+            type: 'VIP'
+        };
     }
-    if (perfect) {
-        return {predict: last7[6] === 'B' ? 'P' : 'B', name: 'Perfect Zigzag 7', conf: 98};
+    if (last.n === 3) {
+        return {
+            predict: last.c,
+            name: `VỆT ${last.c} x3 - TIẾP`,
+            conf: 82,
+            type: 'VIP'
+        };
     }
     return null;
 }
 
-function F2_StrictRepetition(arr) {
-    if (arr.length < 10) return null;
-    const runs = timChuoi(arr);
-    if (runs.length >= 5) {
-        const last5 = runs.slice(-5);
-        if (last5.every(r => r.n === 2)) {
-            return {predict: last5[last5.length - 1].c === 'B' ? 'P' : 'B', name: 'Strict 2-2-2-2-2', conf: 97};
+// ==================== CÔNG THỨC VIP 2: CẦU 1-1 ZIGZAG ====================
+function CT_Zigzag(arr) {
+    if (arr.length < 6) return null;
+    const last6 = arr.slice(-6);
+    let isZigzag = true;
+    for (let i = 1; i < last6.length; i++) {
+        if (last6[i] === last6[i-1] || last6[i] === 'T' || last6[i-1] === 'T') {
+            isZigzag = false;
+            break;
         }
     }
+    if (isZigzag) {
+        const last = last6[last6.length - 1];
+        return {
+            predict: last === 'B' ? 'P' : 'B',
+            name: 'CẦU 1-1 ZIGZAG',
+            conf: 91,
+            type: 'VIP'
+        };
+    }
     return null;
 }
 
-function F3_ConfirmedTrend(arr) {
-    if (arr.length < 15) return null;
+// ==================== CÔNG THỨC VIP 3: CẦU 2-2 ====================
+function CT_222(arr) {
+    if (arr.length < 8) return null;
     const runs = timChuoi(arr);
     if (runs.length >= 3) {
         const last3 = runs.slice(-3);
-        if (last3[0].n >= 3 && last3[1].n >= 3 && last3[2].n >= 3) {
-            return {predict: last3[2].c, name: 'Confirmed Trend', conf: 94};
+        if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c,
+                name: 'CẦU 2-2-2',
+                conf: 93,
+                type: 'VIP'
+            };
+        }
+        if (last3[1].n === 2 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 2-2',
+                conf: 86,
+                type: 'VIP'
+            };
         }
     }
     return null;
 }
 
-function F4_StatisticalRegression(arr) {
-    if (arr.length < 30) return null;
-    const ts = demTanSuat(arr);
-    if (ts.B > ts.P + 10) return {predict: 'B', name: `Stat Trend B+${Math.round(ts.B-ts.P)}`, conf: 90};
-    if (ts.P > ts.B + 10) return {predict: 'P', name: `Stat Trend P+${Math.round(ts.P-ts.B)}`, conf: 90};
-    return null;
-}
-
-function F5_EntropyAnalysis(arr) {
-    if (arr.length < 30) return null;
-    const entropy = tinhEntropy(arr);
-    const ts = demTanSuat(arr);
-    if (entropy < 0.95) {
-        if (ts.B > ts.P) return {predict: 'B', name: `Low Entropy B`, conf: 91};
-        if (ts.P > ts.B) return {predict: 'P', name: `Low Entropy P`, conf: 91};
-    }
-    return null;
-}
-
-function F6_ConsecutivePattern(arr) {
+// ==================== CÔNG THỨC VIP 4: CẦU 3-3 ====================
+function CT_333(arr) {
     if (arr.length < 10) return null;
     const runs = timChuoi(arr);
-    if (runs.length >= 4) {
-        const pattern = runs.slice(-4).map(r => r.n);
-        if (pattern[0] === pattern[2] && pattern[1] === pattern[3]) {
-            return {predict: runs[runs.length-1].c === 'B' ? 'P' : 'B', name: 'Consecutive Pattern', conf: 93};
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 3 && last3[2].n === 3) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-3-3',
+                conf: 92,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 2) {
+        const last2 = runs.slice(-2);
+        if (last2[0].n === 3 && last2[1].n === 3) {
+            return {
+                predict: last2[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-3',
+                conf: 87,
+                type: 'VIP'
+            };
         }
     }
     return null;
 }
 
-function F7_TripleBreak(arr) {
+// ==================== CÔNG THỨC VIP 5: CẦU 4-4 ====================
+function CT_444(arr) {
     if (arr.length < 12) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 2) {
+        const last2 = runs.slice(-2);
+        if (last2[0].n === 4 && last2[1].n === 4) {
+            return {
+                predict: last2[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 4-4',
+                conf: 90,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
+
+// ==================== CÔNG THỨC VIP 6: CẦU 1-2-1 ====================
+function CT_121(arr) {
+    if (arr.length < 8) return null;
     const runs = timChuoi(arr);
     if (runs.length >= 4) {
         const last4 = runs.slice(-4);
-        if (last4[0].n === 3 && last4[1].n === 3 && last4[2].n === 3) {
-            return {predict: last4[3].c, name: 'Triple Break Continue', conf: 92};
+        if (last4[0].n === 1 && last4[1].n === 2 && last4[2].n === 1 && last4[3].n === 2) {
+            return {
+                predict: last4[1].c,
+                name: 'CẦU 1-2-1-2',
+                conf: 94,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 1) {
+            return {
+                predict: last3[1].c,
+                name: 'CẦU 1-2-1',
+                conf: 89,
+                type: 'VIP'
+            };
         }
     }
     return null;
 }
 
-function F8_VarianceThreshold(arr) {
-    if (arr.length < 20) return null;
-    const ts = demTanSuat(arr.slice(-10));
-    if (ts.B >= 70) return {predict: 'B', name: 'Spike B Trend', conf: 91};
-    if (ts.P >= 70) return {predict: 'P', name: 'Spike P Trend', conf: 91};
-    return null;
-}
-
-function F9_CriticalBalance(arr) {
-    if (arr.length < 30) return null;
-    const ts = demTanSuat(arr);
-    const diff = Math.abs(ts.B - ts.P);
-    if (diff > 15) {
-        return {predict: ts.B > ts.P ? 'P' : 'B', name: `Balance Reversal ${Math.round(diff)}%`, conf: 92};
-    }
-    return null;
-}
-
-function F10_PeakValley(arr) {
-    if (arr.length < 12) return null;
-    const runs = timChuoi(arr);
-    const last = runs[runs.length - 1];
-    if (last && last.n >= 5) {
-        return {predict: last.c === 'B' ? 'P' : 'B', name: 'Streak Reversal', conf: 94};
-    }
-    return null;
-}
-
-function F11_StandardDeviation(arr) {
-    if (arr.length < 30) return null;
-    const stdDev = calcStdDev(arr);
-    const ts = demTanSuat(arr);
-    if (stdDev > 10) {
-        return {predict: ts.B > ts.P ? 'B' : 'P', name: `StdDev Trend`, conf: 89};
-    }
-    return null;
-}
-
-function F12_ZScore(arr) {
-    if (arr.length < 30) return null;
-    const ts = demTanSuat(arr);
-    const stdDev = Math.sqrt(ts.total * 0.25);
-    const zScore = Math.abs(ts.countB - ts.total * 0.5) / (stdDev || 1);
-    if (zScore > 1.8) {
-        return {predict: ts.countB > ts.countP ? 'P' : 'B', name: `Z-Score Regress`, conf: 91};
-    }
-    return null;
-}
-
-function F13_BinomialTest(arr) {
-    if (arr.length < 30) return null;
-    const ts = demTanSuat(arr);
-    if (ts.countB > ts.countP + 5) return {predict: 'B', name: 'Binomial B Dominant', conf: 90};
-    if (ts.countP > ts.countB + 5) return {predict: 'P', name: 'Binomial P Dominant', conf: 90};
-    return null;
-}
-
-function F14_SequencePattern(arr) {
+// ==================== CÔNG THỨC VIP 7: CẦU 2-1-2 ====================
+function CT_212(arr) {
     if (arr.length < 8) return null;
-    const last = arr.slice(-4).join('');
-    if (last === 'BPBP') return {predict: 'B', name: 'Pattern BPBP -> B', conf: 93};
-    if (last === 'PBPB') return {predict: 'P', name: 'Pattern PBPB -> P', conf: 93};
-    if (last === 'BBPP') return {predict: 'B', name: 'Pattern BBPP -> B', conf: 91};
-    if (last === 'PPBB') return {predict: 'P', name: 'Pattern PPBB -> P', conf: 91};
-    return null;
-}
-
-function F15_OscillationAnalysis(arr) {
-    if (arr.length < 15) return null;
-    let switchCount = 0;
-    for (let i = 1; i < arr.length; i++) {
-        if (arr[i] !== arr[i-1]) switchCount++;
-    }
-    const switchRate = switchCount / arr.length;
-    if (switchRate > 0.65) {
-        const last = arr[arr.length-1];
-        return {predict: last === 'B' ? 'P' : 'B', name: `High Oscillation`, conf: 92};
-    }
-    return null;
-}
-
-function F16_ClusterAnalysis(arr) {
-    if (arr.length < 20) return null;
     const runs = timChuoi(arr);
-    const last = runs[runs.length - 1];
-    if (last && last.n === 1) {
-        return {predict: last.c === 'B' ? 'B' : 'P', name: 'Cluster Continuation', conf: 88};
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 2 && last4[1].n === 1 && last4[2].n === 2 && last4[3].n === 1) {
+            return {
+                predict: last4[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 2-1-2-1',
+                conf: 93,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 1 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 2-1-2',
+                conf: 88,
+                type: 'VIP'
+            };
+        }
     }
     return null;
 }
 
-function F17_SlidingWindow(arr) {
-    if (arr.length < 15) return null;
+// ==================== CÔNG THỨC VIP 8: CHÓP DÀI ====================
+function CT_Chop(arr) {
+    if (arr.length < 10) return null;
     const last10 = arr.slice(-10);
-    const ts = demTanSuat(last10);
-    if (ts.B > ts.P) return {predict: 'B', name: 'Sliding Window B', conf: 89};
-    if (ts.P > ts.B) return {predict: 'P', name: 'Sliding Window P', conf: 89};
-    return null;
-}
-
-function F18_AutoregressiveModel(arr) {
-    if (arr.length < 10) return null;
-    const numArr = arr.slice(-5).map(c => c === 'B' ? 1 : -1);
-    const sum = numArr.reduce((a, b) => a + b, 0);
-    if (sum > 1) return {predict: 'B', name: 'AR Model B', conf: 88};
-    if (sum < -1) return {predict: 'P', name: 'AR Model P', conf: 88};
-    return null;
-}
-
-function F19_KalmanFilter(arr) {
-    if (arr.length < 20) return null;
-    const ts = demTanSuat(arr.slice(-15));
-    if (ts.B > 55) return {predict: 'B', name: 'Kalman B Bias', conf: 89};
-    if (ts.P > 55) return {predict: 'P', name: 'Kalman P Bias', conf: 89};
-    return null;
-}
-
-function F20_PeakDetection(arr) {
-    if (arr.length < 15) return null;
-    const runs = timChuoi(arr);
-    const last = runs[runs.length - 1];
-    if (last && last.n === 4) {
-        return {predict: last.c, name: 'Dragon Peak 4', conf: 91};
+    const runs = timChuoi(last10);
+    if (runs.every(r => r.n === 1) && runs.length >= 8) {
+        const last = runs[runs.length - 1].c;
+        return {
+            predict: last === 'B' ? 'P' : 'B',
+            name: 'CHÓP DÀI 8-10',
+            conf: 95,
+            type: 'VIP'
+        };
+    }
+    if (arr.length >= 8) {
+        const last8 = arr.slice(-8);
+        const runs8 = timChuoi(last8);
+        if (runs8.every(r => r.n === 1) && runs8.length >= 6) {
+            const last = runs8[runs8.length - 1].c;
+            return {
+                predict: last === 'B' ? 'P' : 'B',
+                name: 'CHÓP DÀI 6-8',
+                conf: 91,
+                type: 'VIP'
+            };
+        }
     }
     return null;
 }
 
-function F21_PatternMatching(arr, tableId) {
-    if (arr.length < 6) return null;
-    const pattern = arr.slice(-4).join('');
-    if (pattern === 'BBBB') return {predict: 'B', name: 'Dragon B Match', conf: 95};
-    if (pattern === 'PPPP') return {predict: 'P', name: 'Dragon P Match', conf: 95};
-    return null;
-}
-
-function F22_SimilarityAnalysis(arr) {
-    if (arr.length < 20) return null;
-    const half = Math.floor(arr.length / 2);
-    const first = arr.slice(0, half);
-    const second = arr.slice(half);
-    const ts1 = demTanSuat(first);
-    const ts2 = demTanSuat(second);
-    if (ts2.B > ts1.B) return {predict: 'B', name: 'Similarity Rising B', conf: 87};
-    if (ts2.P > ts1.P) return {predict: 'P', name: 'Similarity Rising P', conf: 87};
-    return null;
-}
-
-function F23_RegressionAnalysis(arr) {
-    if (arr.length < 20) return null;
-    const numArr = arr.slice(-10).map((c, i) => ({x: i, y: c === 'B' ? 1 : -1}));
-    const sumY = numArr.reduce((a, b) => a + b.y, 0);
-    if (sumY > 2) return {predict: 'B', name: 'Regression Trend B', conf: 88};
-    if (sumY < -2) return {predict: 'P', name: 'Regression Trend P', conf: 88};
-    return null;
-}
-
-function F24_OutlierDetection(arr) {
-    if (arr.length < 15) return null;
-    const runs = timChuoi(arr);
-    const last = runs[runs.length - 1];
-    if (last && last.n >= 6) {
-        return {predict: last.c === 'B' ? 'P' : 'B', name: 'Outlier Break', conf: 95};
+// ==================== CÔNG THỨC VIP 9: CÂN BẰNG ====================
+function CT_Balance(arr) {
+    if (arr.length < 30) return null;
+    const stats = demTanSuat(arr);
+    const diff = stats.B - stats.P;
+    
+    if (diff > 20) {
+        return {
+            predict: 'P',
+            name: `BALANCE B>P ${Math.round(diff)}%`,
+            conf: 88,
+            type: 'VIP'
+        };
+    }
+    if (diff < -20) {
+        return {
+            predict: 'B',
+            name: `BALANCE P>B ${Math.round(Math.abs(diff))}%`,
+            conf: 88,
+            type: 'VIP'
+        };
+    }
+    if (diff > 15) {
+        return {
+            predict: 'P',
+            name: `BALANCE B>P ${Math.round(diff)}%`,
+            conf: 82,
+            type: 'VIP'
+        };
+    }
+    if (diff < -15) {
+        return {
+            predict: 'B',
+            name: `BALANCE P>B ${Math.round(Math.abs(diff))}%`,
+            conf: 82,
+            type: 'VIP'
+        };
     }
     return null;
 }
 
-function F25_HiddenMarkovModel(arr) {
+// ==================== CÔNG THỨC VIP 10: TIE CYCLE ====================
+function CT_Tie(arr) {
     if (arr.length < 15) return null;
-    const last2 = arr.slice(-2).join('');
-    if (last2 === 'BB') return {predict: 'B', name: 'HMM BB State', conf: 90};
-    if (last2 === 'PP') return {predict: 'P', name: 'HMM PP State', conf: 90};
-    if (last2 === 'BP') return {predict: 'B', name: 'HMM BP State', conf: 88};
-    if (last2 === 'PB') return {predict: 'P', name: 'HMM PB State', conf: 88};
-    return null;
-}
-
-function F26_SpectralAnalysis(arr) {
-    if (arr.length < 20) return null;
-    const last = arr[arr.length - 1];
-    return {predict: last, name: 'Spectral Momentum', conf: 85};
-}
-
-function F27_WaveletAnalysis(arr) {
-    if (arr.length < 15) return null;
-    const ts = demTanSuat(arr.slice(-6));
-    if (ts.B > ts.P) return {predict: 'B', name: 'Wavelet B Wave', conf: 87};
-    if (ts.P > ts.B) return {predict: 'P', name: 'Wavelet P Wave', conf: 87};
-    return null;
-}
-
-function F28_IsolationForest(arr) {
-    if (arr.length < 15) return null;
-    const runs = timChuoi(arr);
-    if (runs.length >= 3 && runs[runs.length-1].n === 1 && runs[runs.length-2].n === 1) {
-        return {predict: arr[arr.length-1] === 'B' ? 'P' : 'B', name: 'Isolation PingPong', conf: 91};
+    const tiePos = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 'T') tiePos.push(i);
+    }
+    if (tiePos.length < 2) return null;
+    
+    const gaps = [];
+    for (let i = 1; i < tiePos.length; i++) {
+        gaps.push(tiePos[i] - tiePos[i-1]);
+    }
+    const avgGap = gaps.reduce((a,b) => a+b, 0) / gaps.length;
+    const lastGap = arr.length - 1 - tiePos[tiePos.length - 1];
+    
+    if (lastGap > avgGap * 1.8 && avgGap < 15) {
+        return {
+            predict: 'T',
+            name: `TIE CYCLE (gap ${Math.round(avgGap)})`,
+            conf: 84,
+            type: 'VIP'
+        };
     }
     return null;
 }
 
-function F29_ARIMA(arr) {
-    if (arr.length < 20) return null;
-    const last3 = arr.slice(-3).join('');
-    if (last3 === 'BBB') return {predict: 'B', name: 'ARIMA Trend B', conf: 92};
-    if (last3 === 'PPP') return {predict: 'P', name: 'ARIMA Trend P', conf: 92};
-    return null;
-}
-
-function F30_BayesianInference(arr) {
-    if (arr.length < 20) return null;
-    const ts = demTanSuat(arr);
-    if (ts.B > 52) return {predict: 'B', name: 'Bayes Prob B', conf: 89};
-    if (ts.P > 52) return {predict: 'P', name: 'Bayes Prob P', conf: 89};
-    return null;
-}
-
-function F31_RandomForestEnsemble(arr) {
-    if (arr.length < 10) return null;
-    const bCount = arr.slice(-8).filter(x => x === 'B').length;
-    if (bCount >= 5) return {predict: 'B', name: 'Forest Vote B', conf: 90};
-    if (bCount <= 3) return {predict: 'P', name: 'Forest Vote P', conf: 90};
-    return null;
-}
-
-function F32_GradientBoosting(arr) {
-    if (arr.length < 12) return null;
-    const last2 = arr.slice(-2).join('');
-    if (last2 === 'BP') return {predict: 'P', name: 'GradBoost P', conf: 87};
-    if (last2 === 'PB') return {predict: 'B', name: 'GradBoost B', conf: 87};
-    return null;
-}
-
-function F33_AdaBoost(arr) {
-    if (arr.length < 15) return null;
-    const last = arr[arr.length-1];
-    return {predict: last, name: 'AdaBoost Repeat', conf: 86};
-}
-
-function F34_StackingEnsemble(arr) {
-    if (arr.length < 15) return null;
-    const ts = demTanSuat(arr.slice(-5));
-    return {predict: ts.B >= ts.P ? 'B' : 'P', name: 'Stacking Trend', conf: 88};
-}
-
-function F35_VotingClassifier(arr) {
-    if (arr.length < 10) return null;
-    const last5 = arr.slice(-5);
-    const b = last5.filter(x => x === 'B').length;
-    return {predict: b >= 3 ? 'B' : 'P', name: 'Voting Majority', conf: 89};
-}
-
-function F36_CrossValidation(arr) { me = arr; return null; }
-function F37_BootstrapAggregating(arr) { return null; }
-
-function F38_NeuralNetwork(arr) {
-    if (arr.length < 10) return null;
-    const ts = demTanSuat(arr.slice(-8));
-    if (ts.B > 60) return {predict: 'B', name: 'Neural Net B', conf: 91};
-    if (ts.P > 60) return {predict: 'P', name: 'Neural Net P', conf: 91};
-    return null;
-}
-
-function F39_MetaLearning(arr) { return null; }
-function F40_ConsensusVoting(arr) { return null; }
-
-function F41_DoubleSandwich(arr) {
-    if (arr.length < 5) return null;
-    const last5 = arr.slice(-5).join('');
-    if (last5 === 'BPBPB') return {predict: 'P', name: 'Double Sandwich P', conf: 94};
-    if (last5 === 'PBPBP') return {predict: 'B', name: 'Double Sandwich B', conf: 94};
-    return null;
-}
-
-function F42_GoldenRatio(arr) {
-    if (arr.length < 15) return null;
-    const ts = demTanSuat(arr);
-    if (ts.B / (ts.P + 0.1) > 1.3) return {predict: 'P', name: 'Golden Reversal P', conf: 88};
-    if (ts.P / (ts.B + 0.1) > 1.3) return {predict: 'B', name: 'Golden Reversal B', conf: 88};
-    return null;
-}
-
-function F43_MomentumShift(arr) {
-    if (arr.length < 10) return null;
-    const last4 = arr.slice(-4).join('');
-    if (last4 === 'BPPP') return {predict: 'P', name: 'Momentum P Push', conf: 90};
-    if (last4 === 'PBBB') return {predict: 'B', name: 'Momentum B Push', conf: 90};
-    return null;
-}
-
-function F44_ReversalZone(arr) {
+// ==================== CÔNG THỨC VIP 11: CẦU 3-2-1 ====================
+function CT_321(arr) {
     if (arr.length < 8) return null;
     const runs = timChuoi(arr);
-    const last = runs[runs.length-1];
-    if (last && last.n === 3) return {predict: last.c === 'B' ? 'P' : 'B', name: '3-Streak Reversal', conf: 91};
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 3 && last4[1].n === 2 && last4[2].n === 1 && last4[3].n === 2) {
+            return {
+                predict: last4[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-2-1-2',
+                conf: 90,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 2 && last3[2].n === 1) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-2-1',
+                conf: 86,
+                type: 'VIP'
+            };
+        }
+    }
     return null;
 }
 
-function F45_CycleCompletion(arr) {
+// ==================== CÔNG THỨC VIP 12: CẦU 1-2-3 ====================
+function CT_123(arr) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 1 && last4[1].n === 2 && last4[2].n === 3 && last4[3].n === 1) {
+            return {
+                predict: last4[1].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 1-2-3-1',
+                conf: 89,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 3) {
+            return {
+                predict: last3[1].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 1-2-3',
+                conf: 87,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
+
+// ==================== CÔNG THỨC VIP 13: CẦU 2-3-2 ====================
+function CT_232(arr) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 2 && last4[1].n === 3 && last4[2].n === 2 && last4[3].n === 3) {
+            return {
+                predict: last4[0].c,
+                name: 'CẦU 2-3-2-3',
+                conf: 91,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 3 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c,
+                name: 'CẦU 2-3-2',
+                conf: 88,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
+
+// ==================== CÔNG THỨC VIP 14: CẦU 3-1-3 ====================
+function CT_313(arr) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 3 && last4[1].n === 1 && last4[2].n === 3 && last4[3].n === 1) {
+            return {
+                predict: last4[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-1-3-1',
+                conf: 90,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 1 && last3[2].n === 3) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 3-1-3',
+                conf: 86,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
+
+// ==================== CÔNG THỨC VIP 15: CẦU 2-2-1 ====================
+function CT_221(arr) {
     if (arr.length < 6) return null;
-    const last6 = arr.slice(-6).join('');
-    if (last6 === 'BBPPBB') return {predict: 'P', name: 'Cycle 2-2-2', conf: 93};
-    if (last6 === 'PPBBPP') return {predict: 'B', name: 'Cycle 2-2-2', conf: 93};
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 2 && last4[1].n === 2 && last4[2].n === 1 && last4[3].n === 2) {
+            return {
+                predict: last4[0].c,
+                name: 'CẦU 2-2-1-2',
+                conf: 89,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 1) {
+            return {
+                predict: last3[0].c,
+                name: 'CẦU 2-2-1',
+                conf: 84,
+                type: 'VIP'
+            };
+        }
+    }
     return null;
 }
 
-function F46_WaveFormation(arr) { return null; }
-function F47_StreakExtension(arr) { return null; }
-function F48_QuadrantAnalysis(arr) { return null; }
+// ==================== CÔNG THỨC VIP 16: CẦU 1-1-2 ====================
+function CT_112(arr) {
+    if (arr.length < 6) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 1 && last4[1].n === 1 && last4[2].n === 2 && last4[3].n === 1) {
+            return {
+                predict: last4[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 1-1-2-1',
+                conf: 88,
+                type: 'VIP'
+            };
+        }
+    }
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 1 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 1-1-2',
+                conf: 85,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
 
-function F49_FibonacciSequence(arr) {
+// ==================== CÔNG THỨC VIP 17: CẦU 2-3-1 ====================
+function CT_231(arr) {
     if (arr.length < 8) return null;
     const runs = timChuoi(arr);
     if (runs.length >= 3) {
-        const pattern = runs.slice(-3).map(r => r.n).join('-');
-        if (pattern === '1-2-3') return {predict: runs[runs.length-1].c, name: 'Fibonacci Trend', conf: 95};
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 3 && last3[2].n === 1) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 2-3-1',
+                conf: 87,
+                type: 'VIP'
+            };
+        }
     }
     return null;
 }
 
-function F50_PrimePattern(arr) { return null; }
-
-// ==================== LEARNING SYSTEM ====================
-
-function hocCauMaxPrecision(arr, tableId) {
-    if (arr.length < 6) return null;
-    const last3 = arr.slice(-3).join('');
-    if (last3 === 'BBB') return {predict: 'B', name: 'Pattern Learn B Streak', conf: 92};
-    if (last3 === 'PPP') return {predict: 'P', name: 'Pattern Learn P Streak', conf: 92};
+// ==================== CÔNG THỨC VIP 18: CẦU 1-3-2 ====================
+function CT_132(arr) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 3 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: 'CẦU 1-3-2',
+                conf: 86,
+                type: 'VIP'
+            };
+        }
+    }
     return null;
 }
 
-// ==================== FINAL PREDICTION ENGINE (BALANCED) ====================
+// ==================== CÔNG THỨC VIP 19: PATTERN 1-2-1-2 ====================
+function CT_Pattern1212(arr) {
+    if (arr.length < 12) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 6) {
+        const last6 = runs.slice(-6);
+        const pattern = last6.map(r => r.n);
+        if (pattern.every((n, i) => n === (i % 2 === 0 ? 1 : 2))) {
+            const last = last6[last6.length - 1].c;
+            return {
+                predict: last === 'B' ? 'P' : 'B',
+                name: 'PATTERN 1-2-1-2-1-2',
+                conf: 96,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
 
-function duDoanChiBP(history, tableId) {
+// ==================== CÔNG THỨC VIP 20: PATTERN 2-1-2-1 ====================
+function CT_Pattern2121(arr) {
+    if (arr.length < 12) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 6) {
+        const last6 = runs.slice(-6);
+        const pattern = last6.map(r => r.n);
+        if (pattern.every((n, i) => n === (i % 2 === 0 ? 2 : 1))) {
+            const last = last6[last6.length - 1].c;
+            return {
+                predict: last === 'B' ? 'P' : 'B',
+                name: 'PATTERN 2-1-2-1-2-1',
+                conf: 96,
+                type: 'VIP'
+            };
+        }
+    }
+    return null;
+}
+
+// ==================== HÀM DỰ ĐOÁN CHÍNH ====================
+
+function duDoan(history) {
     const arr = toArr(history);
-    
-    // Nếu ít hơn 3 ván, đoán theo con vừa ra hoặc ưu tiên B
-    if (arr.length < 3) {
-        const last = arr.length > 0 ? arr[arr.length - 1] : 'B';
+    if (arr.length < 5) {
         return {
-            Du_doan: last === 'B' ? 'BANKER' : 'PLAYER',
-            Ti_le: '55%',
-            Do_tin_cay: '60%',
-            Loai_cau: 'Initial State',
-            BANKER: last === 'B' ? '55% (60%)' : '45% (40%)',
-            PLAYER: last === 'P' ? '55% (60%)' : '45% (40%)',
-            So_cong_thuc: '1/50',
-            Top_5_cau: '1.Initial State(60%)'
+            Du_doan: 'CHỜ',
+            Ti_le: '0%',
+            Do_tin_cay: '0%',
+            Loai_cau: 'CHƯA ĐỦ DỮ LIỆU',
+            BANKER: '0%',
+            PLAYER: '0%',
+            TIE: '0%',
+            So_cong_thuc: '0/20',
+            Top_cau: 'CHỜ'
         };
     }
 
+    // ========== CHẠY 20 CÔNG THỨC VIP ==========
+    const results = [];
     const formulas = [
-        F1_PerfectZigzag, F2_StrictRepetition, F3_ConfirmedTrend, F4_StatisticalRegression,
-        F5_EntropyAnalysis, F6_ConsecutivePattern, F7_TripleBreak, F8_VarianceThreshold,
-        F9_CriticalBalance, F10_PeakValley, F11_StandardDeviation, F12_ZScore,
-        F13_BinomialTest, F14_SequencePattern, F15_OscillationAnalysis, F16_ClusterAnalysis,
-        F17_SlidingWindow, F18_AutoregressiveModel, F19_KalmanFilter, F20_PeakDetection,
-        F21_PatternMatching, F22_SimilarityAnalysis, F23_RegressionAnalysis, F24_OutlierDetection,
-        F25_HiddenMarkovModel, F26_SpectralAnalysis, F27_WaveletAnalysis, F28_IsolationForest,
-        F29_ARIMA, F30_BayesianInference, F31_RandomForestEnsemble, F32_GradientBoosting,
-        F33_AdaBoost, F34_StackingEnsemble, F35_VotingClassifier, F36_CrossValidation,
-        F37_BootstrapAggregating, F38_NeuralNetwork, F39_MetaLearning, F40_ConsensusVoting,
-        F41_DoubleSandwich, F42_GoldenRatio, F43_MomentumShift, F44_ReversalZone,
-        F45_CycleCompletion, F46_WaveFormation, F47_StreakExtension, F48_QuadrantAnalysis,
-        F49_FibonacciSequence, F50_PrimePattern
+        CT_VetDai, CT_Zigzag, CT_222, CT_333, CT_444,
+        CT_121, CT_212, CT_Chop, CT_Balance, CT_Tie,
+        CT_321, CT_123, CT_232, CT_313, CT_221,
+        CT_112, CT_231, CT_132, CT_Pattern1212, CT_Pattern2121
     ];
 
-    const results = [];
-    
     for (const formula of formulas) {
-        try {
-            const res = formula(arr, tableId);
-            if (res && (res.predict === 'B' || res.predict === 'P')) {
-                results.push(res);
-            }
-        } catch (e) {}
-    }
-    
-    const learnResult = hocCauMaxPrecision(arr, tableId);
-    if (learnResult) results.push(learnResult);
-
-    let scoreB = 0, scoreP = 0;
-    
-    if (results.length > 0) {
-        for (const r of results) {
-            if (r.predict === 'B') scoreB += r.conf;
-            else if (r.predict === 'P') scoreP += r.conf;
+        const result = formula(arr);
+        if (result) {
+            results.push(result);
         }
     }
 
-    // Fallback nếu không có công thức nào khớp: Dựa vào con vừa ra và tần suất
-    if (scoreB === 0 && scoreP === 0) {
-        const ts = demTanSuat(arr);
-        const last = arr[arr.length - 1];
-        if (ts.B >= ts.P) {
-            scoreB = 65;
-            scoreP = 35;
-        } else {
-            scoreB = 35;
-            scoreP = 65;
-        }
-        results.push({
-            predict: ts.B >= ts.P ? 'B' : 'P',
-            name: `Frequency ${last}`,
-            conf: 65
-        });
+    // ========== NẾU KHÔNG CÓ CÔNG THỨC NÀO ==========
+    if (results.length === 0) {
+        const stats = demTanSuat(arr);
+        let max = Math.max(stats.B, stats.P, stats.T);
+        let predict = stats.B === max ? 'B' : stats.P === max ? 'P' : 'T';
+        let name = predict === 'B' ? 'TẦN SUẤT B' : predict === 'P' ? 'TẦN SUẤT P' : 'TẦN SUẤT T';
+        
+        return {
+            Du_doan: predict === 'B' ? 'BANKER' : predict === 'P' ? 'PLAYER' : 'TIE',
+            Ti_le: Math.round(max) + '%',
+            Do_tin_cay: '55%',
+            Loai_cau: name,
+            BANKER: Math.round(stats.B) + '%',
+            PLAYER: Math.round(stats.P) + '%',
+            TIE: Math.round(stats.T) + '%',
+            So_cong_thuc: '0/20',
+            Top_cau: 'KHÔNG CÓ CẦU'
+        };
     }
 
-    const totalScore = scoreB + scoreP || 1;
-    const ratioB = Math.round((scoreB / totalScore) * 100);
-    const ratioP = 100 - ratioB;
+    // ========== TÍNH ĐIỂM ==========
+    let scoreB = 0, scoreP = 0, scoreT = 0;
+    let countB = 0, countP = 0, countT = 0;
 
-    const prediction = ratioB >= ratioP ? 'BANKER' : 'PLAYER';
-    const confidence = Math.max(ratioB, ratioP);
+    for (const r of results) {
+        if (r.predict === 'B') { scoreB += r.conf; countB++; }
+        else if (r.predict === 'P') { scoreP += r.conf; countP++; }
+        else if (r.predict === 'T') { scoreT += r.conf; countT++; }
+    }
 
-    results.sort((a, b) => b.conf - a.conf);
-    const top5 = results.slice(0, 5).map((r, i) => `${i+1}.${r.name.substring(0, 20)}(${r.conf}%)`).join(' | ');
+    let avgB = countB > 0 ? scoreB / countB : 25;
+    let avgP = countP > 0 ? scoreP / countP : 25;
+    let avgT = countT > 0 ? scoreT / countT : 5;
 
+    const total = avgB + avgP + avgT;
+    avgB = (avgB / total * 100);
+    avgP = (avgP / total * 100);
+    avgT = (avgT / total * 100);
+
+    // ========== TÍNH ĐỘ TIN CẬY ==========
+    const baseConf = 50 + results.length * 2.5;
+    const confB = Math.min(baseConf + (avgB - 33) * 1.8, 98);
+    const confP = Math.min(baseConf + (avgP - 33) * 1.8, 98);
+    const confT = Math.min(baseConf + (avgT - 33) * 1.2, 88);
+
+    const sides = [
+        {name: 'BANKER', rate: Math.round(avgB), conf: Math.round(confB)},
+        {name: 'PLAYER', rate: Math.round(avgP), conf: Math.round(confP)},
+        {name: 'TIE', rate: Math.round(avgT), conf: Math.round(confT)}
+    ];
+    sides.sort((a,b) => b.conf - a.conf);
+    const best = sides[0];
+
+    // ========== TOP CẦU VIP ==========
+    results.sort((a,b) => b.conf - a.conf);
+    const top5 = results.slice(0, 5).map((r, i) => `${i+1}.${r.name}`).join(' | ');
+
+    // ========== KẾT QUẢ ==========
     return {
-        Du_doan: prediction,
-        Ti_le: confidence + '%',
-        Do_tin_cay: (75 + Math.min(results.length, 20)) + '%',
-        Loai_cau: results[0]?.name.substring(0, 35) || 'Pattern Analysis',
-        BANKER: ratioB + '%',
-        PLAYER: ratioP + '%',
-        So_cong_thuc: results.length + '/50',
-        Top_5_cau: top5 || 'Analyzing...'
+        Du_doan: best.name,
+        Ti_le: best.rate + '%',
+        Do_tin_cay: best.conf + '%',
+        Loai_cau: results[0]?.name || 'KHÔNG XÁC ĐỊNH',
+        BANKER: Math.round(avgB) + '% (' + Math.round(confB) + '%)',
+        PLAYER: Math.round(avgP) + '% (' + Math.round(confP) + '%)',
+        TIE: Math.round(avgT) + '% (' + Math.round(confT) + '%)',
+        So_cong_thuc: results.length + '/20',
+        Top_cau: top5,
+        Loai: 'VIP'
     };
 }
 
-// ==================== API ROUTES ====================
+// ==================== LẤY DỮ LIỆU ====================
 
 async function fetchTableData(tableId) {
     try {
         const url = API_BASE + '/api/baccarat/' + tableId.toUpperCase();
-        const res = await axios.get(url, { timeout: 10000 });
+        console.log('📡 FETCH:', url);
+        const res = await axios.get(url, { timeout: 15000 });
         if (res.data?.success && res.data?.data) return res.data.data.result || '';
         return '';
     } catch (e) {
+        console.error('❌ ERROR:', tableId, e.message);
         return '';
     }
 }
+
+// ==================== API ENDPOINTS ====================
 
 app.get('/api/predict/:tableId', async (req, res) => {
     try {
         const tableId = req.params.tableId.toUpperCase();
         const cauGoc = await fetchTableData(tableId);
         if (!cauGoc) {
-            return res.json({ success: false, message: 'Không tìm thấy thông tin bàn ' + tableId });
+            return res.json({ 
+                success: false, 
+                message: 'KHÔNG TÌM THẤY BÀN ' + tableId 
+            });
         }
 
         const old = lastData[tableId] || '';
@@ -620,27 +715,30 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNew) sessionData[tableId]++;
 
-        const result = duDoanChiBP(cauGoc, tableId);
+        const result = duDoan(cauGoc);
 
         res.json({
             success: true,
             phien: sessionData[tableId],
-            cau_goc: cauGoc.substring(Math.max(0, cauGoc.length - 50)),
+            cau_goc: cauGoc,
             Du_doan: result.Du_doan,
             Ti_le: result.Ti_le,
             Do_tin_cay: result.Do_tin_cay,
             Loai_cau: result.Loai_cau,
             BANKER: result.BANKER,
             PLAYER: result.PLAYER,
+            TIE: result.TIE,
             So_cong_thuc: result.So_cong_thuc,
-            Top_5_cau: result.Top_5_cau,
-            engine: 'BACCARAT-B-VS-P-BALANCED-50-FORMULAS',
-            mode: 'BINARY-PREDICTION',
-            timestamp: new Date().toISOString(),
-            author: '@AR-AI'
+            Top_cau: result.Top_cau,
+            Loai: result.Loai,
+            author: '@tranhoang2286',
+            timestamp: new Date().toISOString()
         });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
+        res.status(500).json({ 
+            success: false, 
+            error: e.message 
+        });
     }
 });
 
@@ -659,46 +757,107 @@ app.get('/api/predict/all', async (req, res) => {
             if (!sessionData[id]) sessionData[id] = 0;
             if (isNew) sessionData[id]++;
 
-            const result = duDoanChiBP(cauGoc, id);
+            const result = duDoan(cauGoc);
+            
             predictions[id] = {
                 phien: sessionData[id],
                 Du_doan: result.Du_doan,
                 Ti_le: result.Ti_le,
                 Do_tin_cay: result.Do_tin_cay,
+                Loai_cau: result.Loai_cau,
                 BANKER: result.BANKER,
-                PLAYER: result.PLAYER
+                PLAYER: result.PLAYER,
+                TIE: result.TIE,
+                Top_cau: result.Top_cau
             };
         }
 
         res.json({
             success: true,
-            engine: 'BACCARAT-B-VS-P-BALANCED-50-FORMULAS',
-            mode: 'BINARY-PREDICTION',
-            version: '4.2.0-BALANCED',
+            engine: 'VIP-20-CONGTHUC',
+            version: '3.0.0',
             timestamp: new Date().toISOString(),
-            author: '@AR-AI',
+            author: '@tranhoang2286',
+            tong_cong_thuc: 20,
             predictions: predictions
         });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
+        res.status(500).json({ 
+            success: false, 
+            error: e.message 
+        });
+    }
+});
+
+app.get('/api/baccarat/:tableId', async (req, res) => {
+    try {
+        const tableId = req.params.tableId.toUpperCase();
+        const result = await fetchTableData(tableId);
+        if (result) {
+            res.json({ 
+                success: true, 
+                data: { 
+                    table: tableId, 
+                    result: result 
+                } 
+            });
+        } else {
+            res.json({ 
+                success: false, 
+                message: 'KHÔNG TÌM THẤY BÀN ' + tableId 
+            });
+        }
+    } catch (e) {
+        res.status(500).json({ 
+            success: false, 
+            error: e.message 
+        });
     }
 });
 
 app.get('/', (req, res) => {
     res.json({
-        name: 'BACCARAT BINARY - FIXED B vs P BALANCED',
-        version: '4.2.0-BALANCED',
-        author: '@AR-AI',
-        mode: 'BINARY-PREDICTION',
-        formulas: 50,
-        status: 'Fixed ALL - Balanced B & P prediction'
+        name: 'BACCARAT VIP - 20 CÔNG THỨC',
+        version: '3.0.0',
+        author: '@tranhoang2286',
+        tong_cong_thuc: 20,
+        loai: 'VIP - KHÔNG RANDOM',
+        cong_thuc: [
+            '1. VỆT DÀI (Đảo/Tiếp)',
+            '2. CẦU 1-1 ZIGZAG',
+            '3. CẦU 2-2-2',
+            '4. CẦU 3-3-3',
+            '5. CẦU 4-4',
+            '6. CẦU 1-2-1',
+            '7. CẦU 2-1-2',
+            '8. CHÓP DÀI',
+            '9. CÂN BẰNG B/P',
+            '10. TIE CYCLE',
+            '11. CẦU 3-2-1',
+            '12. CẦU 1-2-3',
+            '13. CẦU 2-3-2',
+            '14. CẦU 3-1-3',
+            '15. CẦU 2-2-1',
+            '16. CẦU 1-1-2',
+            '17. CẦU 2-3-1',
+            '18. CẦU 1-3-2',
+            '19. PATTERN 1-2-1-2',
+            '20. PATTERN 2-1-2-1'
+        ],
+        endpoints: {
+            'Dự đoán 1 bàn': '/api/predict/:tableId',
+            'Dự đoán tất cả': '/api/predict/all',
+            'Lấy dữ liệu': '/api/baccarat/:tableId'
+        }
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
-    console.log('   BACCARAT BALANCED B vs P - FIXED     ');
-    console.log('   50 FORMULAS v4.2.0                  ');
+    console.log('  BACCARAT VIP - 20 CÔNG THỨC');
     console.log('========================================');
-    console.log('🚀 Server running on port: ' + PORT);
+    console.log('🚀 http://localhost:' + PORT);
+    console.log('👤 @tranhoang2286');
+    console.log('📊 20 CÔNG THỨC VIP - KHÔNG RANDOM');
+    console.log('========================================');
 });
