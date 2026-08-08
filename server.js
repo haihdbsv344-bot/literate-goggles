@@ -12,10 +12,10 @@ app.use((req, res, next) => {
 const API_BASE = 'https://solid-computing-machine-uz8r.onrender.com';
 const sessionData = {};
 const lastData = {};
-const tableAI = {}; // Per-table independent AI
-const tableHistory = {}; // Lưu lịch sử per bàn
-const tableSignature = {}; // Chữ ký riêng mỗi bàn
-const adaptiveWeights = {}; // Trọng số thích ứng per table
+const tableAI = {};
+const tableHistory = {};
+const tableSignature = {};
+const formulaPerformance = {};
 
 // ==================== CORE UTILITIES ====================
 
@@ -27,7 +27,13 @@ function demTanSuat(arr) {
     const cnt = {B:0, P:0};
     for (const c of arr) if (cnt[c] !== undefined) cnt[c]++;
     const total = arr.length || 1;
-    return {B: cnt.B/total*100, P: cnt.P/total*100, countB: cnt.B, countP: cnt.P, total};
+    return {
+        B: (cnt.B / total * 100),
+        P: (cnt.P / total * 100),
+        countB: cnt.B,
+        countP: cnt.P,
+        total: total
+    };
 }
 
 function timChuoi(arr) {
@@ -51,14 +57,13 @@ function initTableAI(tableId) {
             signature: null,
             dominantSide: null,
             learned: 0,
-            formulas: {},
             history: [],
             lastPrediction: null,
-            adaptiveWeights: {
-                BANKER: 1.0,
-                PLAYER: 1.0,
-                REVERSAL: 1.0
-            }
+            biasHistory: [],
+            formulaPerformance: {},
+            adaptiveWeights: {B: 1.0, P: 1.0},
+            last100B: 0,
+            last100P: 0
         };
     }
     if (!tableHistory[tableId]) {
@@ -69,336 +74,502 @@ function initTableAI(tableId) {
 
 function analyzeTableSignature(tableId, arr) {
     const ai = initTableAI(tableId);
-    if (arr.length < 30) return;
+    if (arr.length < 20) return;
     
     const stats = demTanSuat(arr);
     const runs = timChuoi(arr);
-    const avgRunLength = runs.reduce((a,b) => a + b.n, 0) / runs.length;
+    const avgRunLength = runs.length > 0 ? runs.reduce((a,b) => a + b.n, 0) / runs.length : 1;
+    
+    // Phân tích 100 ván gần nhất
+    const last100 = arr.slice(-100);
+    const stats100 = demTanSuat(last100);
+    
+    ai.last100B = stats100.B;
+    ai.last100P = stats100.P;
     
     ai.signature = {
         dominantSide: stats.B > stats.P ? 'B' : 'P',
         balance: Math.abs(stats.B - stats.P),
         avgRunLength: avgRunLength,
         tendency: stats.B > 55 ? 'BANKER_HEAVY' : stats.P > 55 ? 'PLAYER_HEAVY' : 'BALANCED',
-        volatility: avgRunLength > 3 ? 'HIGH' : avgRunLength > 1.5 ? 'MEDIUM' : 'LOW'
+        volatility: avgRunLength > 3 ? 'HIGH' : avgRunLength > 1.5 ? 'MEDIUM' : 'LOW',
+        recentBias: stats100.B > stats100.P ? 'B' : 'P',
+        recentBalance: Math.abs(stats100.B - stats100.P)
     };
+    
+    // Cập nhật bias history
+    ai.biasHistory.push({
+        timestamp: Date.now(),
+        bias: ai.signature.recentBias,
+        balance: ai.signature.recentBalance
+    });
+    
+    if (ai.biasHistory.length > 50) {
+        ai.biasHistory.shift();
+    }
 }
 
-// ==================== PREMIUM FORMULAS (ADAPTIVE) ====================
+// ==================== NEUTRAL FORMULAS (KHÔNG THIÊN VỊ) ====================
 
-function CT_VetDai_Adaptive(arr, tableId) {
+// 1. PHÁT HIỆN VỆT - KHÔNG THIÊN VỊ
+function CT_Streak_Neutral(arr, tableId) {
     if (arr.length < 3) return null;
-    const ai = initTableAI(tableId);
     const runs = timChuoi(arr);
+    if (runs.length === 0) return null;
     const last = runs[runs.length - 1];
     
-    // Adapt based on table signature
-    let shouldReverse = false;
-    if (ai.signature && ai.signature.dominantSide === last.c) {
-        shouldReverse = true; // Table has bias towards this side, predict opposite
-    }
-    
-    if (last.n >= 8) {
-        const pred = shouldReverse ? (last.c === 'B' ? 'B' : 'P') : (last.c === 'B' ? 'P' : 'B');
-        return {predict: pred, name: `VỆTX${last.n}(ADAPT)`, conf: 96, type: 'streak', adaptive: shouldReverse};
-    }
+    // Chỉ phát hiện vệt, không dự đoán thiên vị
     if (last.n >= 5) {
-        const pred = shouldReverse ? last.c : (last.c === 'B' ? 'P' : 'B');
-        return {predict: pred, name: `VỆTX${last.n}`, conf: 92, type: 'streak', adaptive: shouldReverse};
+        return {
+            predict: last.c === 'B' ? 'P' : 'B',
+            name: `STREAK_${last.c}x${last.n}_REVERSE`,
+            conf: 85 + Math.min(last.n - 5, 5),
+            type: 'streak',
+            weight: 1.2
+        };
     }
-    
+    if (last.n === 4) {
+        return {
+            predict: last.c === 'B' ? 'P' : 'B',
+            name: `STREAK_${last.c}x4_REVERSE`,
+            conf: 80,
+            type: 'streak',
+            weight: 1.0
+        };
+    }
+    if (last.n === 3) {
+        return {
+            predict: last.c,
+            name: `STREAK_${last.c}x3_CONTINUE`,
+            conf: 75,
+            type: 'streak',
+            weight: 0.9
+        };
+    }
     return null;
 }
 
-function CT_Zigzag_Adaptive(arr, tableId) {
-    if (arr.length < 8) return null;
-    const ai = initTableAI(tableId);
-    const last8 = arr.slice(-8);
-    
+// 2. ZIGZAG - KHÔNG THIÊN VỊ
+function CT_Zigzag_Neutral(arr, tableId) {
+    if (arr.length < 6) return null;
+    const last6 = arr.slice(-6);
     let zigzag = true;
-    for (let i = 1; i < last8.length; i++) {
-        if (last8[i] === last8[i-1]) zigzag = false;
+    for (let i = 1; i < last6.length; i++) {
+        if (last6[i] === last6[i-1]) zigzag = false;
     }
-    
     if (zigzag) {
-        const pred = last8[7] === 'B' ? 'P' : 'B';
-        
-        // Check if it's reversing table bias
-        let adaptive = false;
-        if (ai.signature && ai.signature.dominantSide === pred) {
-            adaptive = true;
-        }
-        
-        return {predict: pred, name: `ZIGZAG_8(ADAPT)`, conf: 97, type: 'alternation', adaptive};
+        return {
+            predict: last6[5] === 'B' ? 'P' : 'B',
+            name: `ZIGZAG_6`,
+            conf: 88,
+            type: 'zigzag',
+            weight: 1.1
+        };
     }
     return null;
 }
 
-function CT_222_Adaptive(arr, tableId) {
+// 3. CẦU 2-2-2 - KHÔNG THIÊN VỊ
+function CT_222_Neutral(arr, tableId) {
     if (arr.length < 8) return null;
-    const ai = initTableAI(tableId);
     const runs = timChuoi(arr);
-    
     if (runs.length >= 3) {
         const last3 = runs.slice(-3);
         if (last3[0].n === 2 && last3[1].n === 2 && last3[2].n === 2) {
-            const basePred = last3[0].c;
-            
-            // Adapt: if table heavily biased towards this, predict opposite more aggressively
-            let adaptive = false;
-            if (ai.signature && ai.signature.dominantSide === basePred && ai.signature.balance > 25) {
-                adaptive = true;
-                const pred = basePred === 'B' ? 'P' : 'B';
-                return {predict: pred, name: `2-2-2_REVERSAL`, conf: 94, type: 'pattern', adaptive: true, boost: 'ANTI_BIAS'};
-            }
-            
-            return {predict: basePred, name: `2-2-2`, conf: 95, type: 'pattern', adaptive};
+            return {
+                predict: last3[0].c,
+                name: `PATTERN_222`,
+                conf: 90,
+                type: 'pattern',
+                weight: 1.15
+            };
         }
     }
-    
     return null;
 }
 
-function CT_333_Adaptive(arr, tableId) {
+// 4. CẦU 3-3-3 - KHÔNG THIÊN VỊ
+function CT_333_Neutral(arr, tableId) {
     if (arr.length < 10) return null;
-    const ai = initTableAI(tableId);
     const runs = timChuoi(arr);
-    
     if (runs.length >= 3) {
         const last3 = runs.slice(-3);
         if (last3[0].n === 3 && last3[1].n === 3 && last3[2].n === 3) {
-            const basePred = last3[0].c === 'B' ? 'P' : 'B';
-            
-            let adaptive = false;
-            if (ai.signature && ai.signature.dominantSide === last3[0].c) {
-                adaptive = true;
-            }
-            
-            return {predict: basePred, name: `3-3-3`, conf: 96, type: 'pattern', adaptive};
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: `PATTERN_333`,
+                conf: 92,
+                type: 'pattern',
+                weight: 1.2
+            };
         }
     }
-    
     return null;
 }
 
-function CT_Chop_Adaptive(arr, tableId) {
-    if (arr.length < 12) return null;
-    const ai = initTableAI(tableId);
-    const last12 = arr.slice(-12);
-    
-    const runs = timChuoi(last12);
-    if (runs.every(r => r.n === 1) && runs.length >= 10) {
-        const basePred = runs[runs.length-1].c === 'B' ? 'P' : 'B';
-        
-        // Chop mode - predict opposite of bias
-        let adaptive = false;
-        if (ai.signature && ai.signature.dominantSide === basePred) {
-            adaptive = true;
-        }
-        
-        return {predict: basePred, name: `CHOP_${runs.length}`, conf: 97, type: 'chop', adaptive};
+// 5. CHÓP DÀI - KHÔNG THIÊN VỊ
+function CT_Chop_Neutral(arr, tableId) {
+    if (arr.length < 10) return null;
+    const last10 = arr.slice(-10);
+    const runs = timChuoi(last10);
+    if (runs.every(r => r.n === 1) && runs.length >= 8) {
+        return {
+            predict: runs[runs.length - 1].c === 'B' ? 'P' : 'B',
+            name: `CHOP_${runs.length}`,
+            conf: 93,
+            type: 'chop',
+            weight: 1.2
+        };
     }
-    
     return null;
 }
 
-function CT_Balance_Adaptive(arr, tableId) {
-    if (arr.length < 50) return null;
-    const ai = initTableAI(tableId);
+// 6. CÂN BẰNG - KHÔNG THIÊN VỊ
+function CT_Balance_Neutral(arr, tableId) {
+    if (arr.length < 30) return null;
     const stats = demTanSuat(arr);
-    const diff = Math.abs(stats.B - stats.P);
+    const diff = stats.B - stats.P;
     
-    if (diff > 45) {
-        const basePred = stats.B > stats.P ? 'P' : 'B';
-        return {predict: basePred, name: `BALANCE_CORRECT(${Math.round(diff)}%)`, conf: 92, type: 'balance', adaptive: true};
+    if (diff > 25) {
+        return {
+            predict: 'P',
+            name: `BALANCE_B+${Math.round(diff)}%`,
+            conf: 85,
+            type: 'balance',
+            weight: 1.0
+        };
     }
-    
+    if (diff < -25) {
+        return {
+            predict: 'B',
+            name: `BALANCE_P+${Math.round(Math.abs(diff))}%`,
+            conf: 85,
+            type: 'balance',
+            weight: 1.0
+        };
+    }
     return null;
 }
 
-function CT_Momentum_Adaptive(arr, tableId) {
-    if (arr.length < 35) return null;
-    const ai = initTableAI(tableId);
+// 7. XU HƯỚNG 10 VÁN - KHÔNG THIÊN VỊ
+function CT_Trend10_Neutral(arr, tableId) {
+    if (arr.length < 10) return null;
+    const last10 = arr.slice(-10);
+    const stats = demTanSuat(last10);
+    const diff = stats.B - stats.P;
     
-    const windows = [];
-    for (let i = 5; i <= arr.length; i += 5) {
-        windows.push(demTanSuat(arr.slice(i-5, i)));
+    if (diff > 30) {
+        return {
+            predict: 'P',
+            name: `TREND10_B+${Math.round(diff)}%`,
+            conf: 82,
+            type: 'trend',
+            weight: 0.9
+        };
     }
-    
-    if (windows.length >= 3) {
-        const last3 = windows.slice(-3);
-        const trend = [last3[1].B - last3[0].B, last3[2].B - last3[1].B];
-        
-        let adaptive = false;
-        if (trend[0] > 15 && trend[1] > 15) {
-            // Banker momentum - reverse if table is banker-heavy
-            if (ai.signature && ai.signature.dominantSide === 'B') {
-                adaptive = true;
-            }
-            return {predict: 'P', name: `MOMENTUM_B(+${Math.round(trend[0])}%)`, conf: 90, type: 'momentum', adaptive};
-        }
-        if (trend[0] < -15 && trend[1] < -15) {
-            if (ai.signature && ai.signature.dominantSide === 'P') {
-                adaptive = true;
-            }
-            return {predict: 'B', name: `MOMENTUM_P(+${Math.round(Math.abs(trend[0]))}%)`, conf: 90, type: 'momentum', adaptive};
-        }
+    if (diff < -30) {
+        return {
+            predict: 'B',
+            name: `TREND10_P+${Math.round(Math.abs(diff))}%`,
+            conf: 82,
+            type: 'trend',
+            weight: 0.9
+        };
     }
-    
     return null;
 }
 
-function CT_Reversal_Adaptive(arr, tableId) {
-    if (arr.length < 40) return null;
-    const ai = initTableAI(tableId);
+// 8. XU HƯỚNG 20 VÁN - KHÔNG THIÊN VỊ
+function CT_Trend20_Neutral(arr, tableId) {
+    if (arr.length < 20) return null;
+    const last20 = arr.slice(-20);
+    const stats = demTanSuat(last20);
+    const diff = stats.B - stats.P;
     
-    const first20 = demTanSuat(arr.slice(0, 20));
-    const last20 = demTanSuat(arr.slice(-20));
-    
-    const changeB = Math.abs(last20.B - first20.B);
-    if (changeB > 45) {
-        const basePred = last20.B > first20.B ? 'P' : 'B';
-        return {predict: basePred, name: `REVERSAL_B(${Math.round(changeB)}%)`, conf: 91, type: 'reversal', adaptive: true};
+    if (diff > 20) {
+        return {
+            predict: 'P',
+            name: `TREND20_B+${Math.round(diff)}%`,
+            conf: 80,
+            type: 'trend',
+            weight: 0.9
+        };
     }
-    
+    if (diff < -20) {
+        return {
+            predict: 'B',
+            name: `TREND20_P+${Math.round(Math.abs(diff))}%`,
+            conf: 80,
+            type: 'trend',
+            weight: 0.9
+        };
+    }
     return null;
 }
 
-function CT_Breakout_Adaptive(arr, tableId) {
-    if (arr.length < 25) return null;
-    const ai = initTableAI(tableId);
+// 9. CẦU 1-2-1 - KHÔNG THIÊN VỊ
+function CT_121_Neutral(arr, tableId) {
+    if (arr.length < 8) return null;
     const runs = timChuoi(arr);
-    
     if (runs.length >= 3) {
         const last3 = runs.slice(-3);
-        const prevAvg = (last3[0].n + last3[1].n) / 2;
-        
-        if (last3[2].n > prevAvg * 2.2 && last3[2].n >= 6) {
-            const basePred = last3[2].c === 'B' ? 'P' : 'B';
-            let adaptive = false;
-            
-            if (ai.signature && ai.signature.dominantSide === last3[2].c) {
-                adaptive = true; // Reversal against bias
-            }
-            
-            return {predict: basePred, name: `BREAKOUT_REVERSE`, conf: 88, type: 'breakout', adaptive};
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 1) {
+            return {
+                predict: last3[1].c,
+                name: `PATTERN_121`,
+                conf: 87,
+                type: 'pattern',
+                weight: 1.1
+            };
         }
     }
-    
     return null;
 }
 
-function CT_CyclePattern_Adaptive(arr, tableId) {
-    if (arr.length < 30) return null;
-    const ai = initTableAI(tableId);
+// 10. CẦU 2-1-2 - KHÔNG THIÊN VỊ
+function CT_212_Neutral(arr, tableId) {
+    if (arr.length < 8) return null;
     const runs = timChuoi(arr);
-    
-    if (runs.length >= 8) {
-        const last8 = runs.slice(-8);
-        
-        if (last8[0].c === last8[4].c && last8[1].c === last8[5].c && last8[2].c === last8[6].c) {
-            return {predict: last8[3].c, name: `CYCLE_PATTERN`, conf: 89, type: 'cycle', adaptive: true};
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 2 && last3[1].n === 1 && last3[2].n === 2) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: `PATTERN_212`,
+                conf: 86,
+                type: 'pattern',
+                weight: 1.1
+            };
         }
     }
-    
     return null;
 }
 
-function CT_FibonacciAdaptive(arr, tableId) {
+// 11. CẦU 3-2-1 - KHÔNG THIÊN VỊ
+function CT_321_Neutral(arr, tableId) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 3 && last3[1].n === 2 && last3[2].n === 1) {
+            return {
+                predict: last3[0].c === 'B' ? 'P' : 'B',
+                name: `PATTERN_321`,
+                conf: 86,
+                type: 'pattern',
+                weight: 1.05
+            };
+        }
+    }
+    return null;
+}
+
+// 12. CẦU 1-2-3 - KHÔNG THIÊN VỊ
+function CT_123_Neutral(arr, tableId) {
+    if (arr.length < 8) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 3) {
+        const last3 = runs.slice(-3);
+        if (last3[0].n === 1 && last3[1].n === 2 && last3[2].n === 3) {
+            return {
+                predict: last3[1].c === 'B' ? 'P' : 'B',
+                name: `PATTERN_123`,
+                conf: 85,
+                type: 'pattern',
+                weight: 1.05
+            };
+        }
+    }
+    return null;
+}
+
+// 13. PHÂN TÍCH TỶ LỆ - KHÔNG THIÊN VỊ
+function CT_Ratio_Neutral(arr, tableId) {
+    if (arr.length < 15) return null;
+    const stats = demTanSuat(arr);
+    const ratio = stats.B / stats.P;
+    
+    if (ratio > 1.6) {
+        return {
+            predict: 'P',
+            name: `RATIO_B/${Math.round(ratio)}`,
+            conf: 78,
+            type: 'ratio',
+            weight: 0.8
+        };
+    }
+    if (ratio < 0.6) {
+        return {
+            predict: 'B',
+            name: `RATIO_P/${Math.round(1/ratio)}`,
+            conf: 78,
+            type: 'ratio',
+            weight: 0.8
+        };
+    }
+    return null;
+}
+
+// 14. PHÁT HIỆN SÓNG - KHÔNG THIÊN VỊ
+function CT_Wave_Neutral(arr, tableId) {
     if (arr.length < 20) return null;
-    const ai = initTableAI(tableId);
     const runs = timChuoi(arr);
+    if (runs.length < 5) return null;
     
-    if (runs.length >= 5) {
-        const last5 = runs.slice(-5).map(r => r.n);
-        if (last5[0] + last5[1] === last5[2] && last5[1] + last5[2] === last5[3] && last5[2] + last5[3] === last5[4]) {
-            return {predict: runs[runs.length-1].c, name: `FIBONACCI(${last5.join('-')})`, conf: 93, type: 'fibonacci', adaptive: true};
-        }
+    const last5 = runs.slice(-5);
+    const avg = last5.reduce((a,b) => a + b.n, 0) / 5;
+    
+    if (avg > 3) {
+        // Sóng dài, dự đoán đảo
+        return {
+            predict: last5[last5.length - 1].c === 'B' ? 'P' : 'B',
+            name: `WAVE_${Math.round(avg)}`,
+            conf: 84,
+            type: 'wave',
+            weight: 1.0
+        };
     }
-    
     return null;
 }
 
-// ==================== AI LEARNING EXTREME ====================
-
-function learnTableBehavior(tableId, arr) {
-    const ai = initTableAI(tableId);
-    
-    if (arr.length < 20) return [];
-    
-    // Learn 6-char patterns specific to this table
-    for (let i = 0; i < arr.length - 6; i++) {
-        const pattern = arr.slice(i, i + 6).join('');
-        if (!ai.patterns[pattern]) {
-            ai.patterns[pattern] = {outcomes: [], accuracy: 0, count: 0};
+// 15. PATTERN 1-2-1-2 - KHÔNG THIÊN VỊ
+function CT_1212_Neutral(arr, tableId) {
+    if (arr.length < 12) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 1 && last4[1].n === 2 && last4[2].n === 1 && last4[3].n === 2) {
+            return {
+                predict: last4[1].c,
+                name: `PATTERN_1212`,
+                conf: 91,
+                type: 'pattern',
+                weight: 1.15
+            };
         }
-        ai.patterns[pattern].count++;
+    }
+    return null;
+}
+
+// 16. PATTERN 2-1-2-1 - KHÔNG THIÊN VỊ
+function CT_2121_Neutral(arr, tableId) {
+    if (arr.length < 12) return null;
+    const runs = timChuoi(arr);
+    if (runs.length >= 4) {
+        const last4 = runs.slice(-4);
+        if (last4[0].n === 2 && last4[1].n === 1 && last4[2].n === 2 && last4[3].n === 1) {
+            return {
+                predict: last4[0].c === 'B' ? 'P' : 'B',
+                name: `PATTERN_2121`,
+                conf: 90,
+                type: 'pattern',
+                weight: 1.15
+            };
+        }
+    }
+    return null;
+}
+
+// 17. PHÂN TÍCH ĐIỂM SỐ - KHÔNG THIÊN VỊ
+function CT_Score_Neutral(arr, tableId) {
+    if (arr.length < 50) return null;
+    
+    // Phân tích điểm số tích lũy
+    let score = 0;
+    for (let i = 0; i < arr.length; i++) {
+        score += arr[i] === 'B' ? 1 : -1;
     }
     
-    // Analyze current pattern
-    const last6 = arr.slice(-6).join('');
+    if (score > 15) {
+        return {
+            predict: 'P',
+            name: `SCORE_+${score}`,
+            conf: 82,
+            type: 'score',
+            weight: 0.9
+        };
+    }
+    if (score < -15) {
+        return {
+            predict: 'B',
+            name: `SCORE_${score}`,
+            conf: 82,
+            type: 'score',
+            weight: 0.9
+        };
+    }
+    return null;
+}
+
+// ==================== AI LEARNING NEUTRAL ====================
+
+function learnTablePatterns(tableId, arr) {
+    const ai = initTableAI(tableId);
     const results = [];
     
-    if (ai.patterns[last6] && ai.patterns[last6].count >= 4) {
-        const pattern = ai.patterns[last6];
-        const outcomes = pattern.outcomes;
-        
-        if (outcomes.length >= 3) {
-            const bCount = outcomes.filter(o => o === 'B').length;
-            const pCount = outcomes.filter(o => o === 'P').length;
-            
-            if (Math.max(bCount, pCount) / outcomes.length > 0.7) {
-                const pred = bCount > pCount ? 'B' : 'P';
-                
-                // Anti-bias: if table heavily predicts this, learn to predict opposite sometimes
-                let antipred = null;
-                if (ai.signature && ai.signature.dominantSide === pred && bCount + pCount >= 5) {
-                    antipred = pred === 'B' ? 'P' : 'B';
-                    results.push({predict: antipred, name: `AI_ANTIBIAS(${last6})`, conf: 89, type: 'ai_antibias', adaptive: true});
-                }
-                
-                results.push({predict: pred, name: `AI_LEARNED(${last6}:${bCount}/${pCount})`, conf: Math.min(75 + (Math.max(bCount, pCount)/outcomes.length)*20, 92), type: 'ai_learned', adaptive: false});
-            }
+    if (arr.length < 20) return results;
+    
+    // Học các pattern 5 ký tự
+    const patterns = {};
+    for (let i = 0; i < arr.length - 5; i++) {
+        const key = arr.slice(i, i + 5).join('');
+        const next = arr[i + 5];
+        if (!patterns[key]) patterns[key] = {B: 0, P: 0};
+        patterns[key][next]++;
+    }
+    
+    // Dự đoán dựa trên pattern cuối
+    const last5 = arr.slice(-5).join('');
+    if (patterns[last5]) {
+        const p = patterns[last5];
+        const total = p.B + p.P;
+        if (total >= 3) {
+            const pred = p.B > p.P ? 'B' : 'P';
+            const conf = 70 + Math.min(Math.abs(p.B - p.P) / total * 20, 15);
+            results.push({
+                predict: pred,
+                name: `AI_PATTERN_${last5}`,
+                conf: conf,
+                type: 'ai_learned',
+                weight: 1.0
+            });
         }
     }
     
     return results;
 }
 
-// ==================== CONSENSUS ANTI-BIAS ====================
+// ==================== ANTI-BIAS DIVERSIFICATION ====================
 
-function applyAntiVoteBias(results, tableId) {
-    const ai = initTableAI(tableId);
+function diversifyPredictions(results) {
+    if (results.length === 0) return results;
     
-    // Count votes
-    const bVotes = results.filter(r => r.predict === 'B').length;
-    const pVotes = results.filter(r => r.predict === 'P').length;
-    const total = bVotes + pVotes;
+    // Đếm số lượng dự đoán mỗi bên
+    let bCount = results.filter(r => r.predict === 'B').length;
+    let pCount = results.filter(r => r.predict === 'P').length;
+    const total = bCount + pCount;
     
-    // If 80%+ agree on one side, flip some formulas
-    if (total > 0) {
-        const majorityPercent = Math.max(bVotes, pVotes) / total;
+    if (total === 0) return results;
+    
+    // Nếu 70%+ dự đoán cùng 1 bên, đa dạng hóa
+    const majorityPercent = Math.max(bCount, pCount) / total;
+    
+    if (majorityPercent > 0.7) {
+        const minority = bCount > pCount ? 'P' : 'B';
+        const needMore = Math.ceil(total * 0.4 - Math.min(bCount, pCount));
         
-        if (majorityPercent > 0.8) {
-            // Too biased - need to diversify
-            const minority = bVotes > pVotes ? 'P' : 'B';
-            const minority_count = Math.min(bVotes, pVotes);
+        if (needMore > 0) {
+            // Lấy các dự đoán có độ tin cậy thấp nhất để đảo
+            const candidates = results
+                .filter(r => r.predict !== minority)
+                .sort((a, b) => a.conf - b.conf)
+                .slice(0, needMore);
             
-            // If we have too few minority votes, reverse some
-            if (minority_count < total * 0.25) {
-                const needMore = Math.ceil(total * 0.3 - minority_count);
-                
-                // Find formulas to flip
-                const flipCandidates = results
-                    .filter(r => r.predict !== minority && r.type !== 'ai_learned')
-                    .sort((a, b) => a.conf - b.conf)
-                    .slice(0, needMore);
-                
-                for (const candidate of flipCandidates) {
-                    candidate.predict = minority;
-                    candidate.flipped = true;
-                    candidate.flipped_reason = 'ANTI_BIAS_DIVERSIFICATION';
-                }
+            for (const c of candidates) {
+                c.predict = minority;
+                c.flipped = true;
+                c.flipped_reason = 'DIVERSIFICATION';
+                c.conf = Math.max(c.conf - 5, 65);
             }
         }
     }
@@ -408,10 +579,8 @@ function applyAntiVoteBias(results, tableId) {
 
 // ==================== MAIN ENGINE ====================
 
-function duDoanPremium(history, tableId) {
+function duDoanNeutral(history, tableId) {
     const arr = toArr(history);
-    
-    // Initialize AI per table
     const ai = initTableAI(tableId);
     analyzeTableSignature(tableId, arr);
     
@@ -420,108 +589,107 @@ function duDoanPremium(history, tableId) {
             Du_doan: 'CHỜ',
             Ti_le: '0%',
             Do_tin_cay: '0%',
-            Loai_cau: 'INSUFFICIENT',
-            Table_signature: null,
-            Formula_match: 0,
+            Loai_cau: 'INSUFFICIENT_DATA',
+            BANKER: '0%',
+            PLAYER: '0%',
+            So_formula: 0,
             Status: 'WAITING',
-            Bias_check: 'N/A'
+            Bias_check: 'NEUTRAL'
         };
     }
 
-    // Run all adaptive formulas
+    // Chạy tất cả công thức
     let results = [];
     
-    results = results.concat(CT_VetDai_Adaptive(arr, tableId));
-    results = results.concat(CT_Zigzag_Adaptive(arr, tableId));
-    results = results.concat(CT_222_Adaptive(arr, tableId));
-    results = results.concat(CT_333_Adaptive(arr, tableId));
-    results = results.concat(CT_Chop_Adaptive(arr, tableId));
-    results = results.concat(CT_Balance_Adaptive(arr, tableId));
-    results = results.concat(CT_Momentum_Adaptive(arr, tableId));
-    results = results.concat(CT_Reversal_Adaptive(arr, tableId));
-    results = results.concat(CT_Breakout_Adaptive(arr, tableId));
-    results = results.concat(CT_CyclePattern_Adaptive(arr, tableId));
-    results = results.concat(CT_FibonacciAdaptive(arr, tableId));
+    results = results.concat(CT_Streak_Neutral(arr, tableId));
+    results = results.concat(CT_Zigzag_Neutral(arr, tableId));
+    results = results.concat(CT_222_Neutral(arr, tableId));
+    results = results.concat(CT_333_Neutral(arr, tableId));
+    results = results.concat(CT_Chop_Neutral(arr, tableId));
+    results = results.concat(CT_Balance_Neutral(arr, tableId));
+    results = results.concat(CT_Trend10_Neutral(arr, tableId));
+    results = results.concat(CT_Trend20_Neutral(arr, tableId));
+    results = results.concat(CT_121_Neutral(arr, tableId));
+    results = results.concat(CT_212_Neutral(arr, tableId));
+    results = results.concat(CT_321_Neutral(arr, tableId));
+    results = results.concat(CT_123_Neutral(arr, tableId));
+    results = results.concat(CT_Ratio_Neutral(arr, tableId));
+    results = results.concat(CT_Wave_Neutral(arr, tableId));
+    results = results.concat(CT_1212_Neutral(arr, tableId));
+    results = results.concat(CT_2121_Neutral(arr, tableId));
+    results = results.concat(CT_Score_Neutral(arr, tableId));
     
     // AI Learning
-    results = results.concat(learnTableBehavior(tableId, arr));
+    results = results.concat(learnTablePatterns(tableId, arr));
     
-    // Remove nulls
     results = results.filter(r => r !== null);
     
-    // Apply anti-bias voting
-    results = applyAntiVoteBias(results, tableId);
+    // Đa dạng hóa để tránh thiên vị
+    results = diversifyPredictions(results);
 
     if (results.length === 0) {
         const stats = demTanSuat(arr);
-        const pred = stats.B > stats.P ? 'BANKER' : 'PLAYER';
         return {
-            Du_doan: pred,
+            Du_doan: stats.B > stats.P ? 'BANKER' : 'PLAYER',
             Ti_le: Math.round(Math.max(stats.B, stats.P)) + '%',
             Do_tin_cay: '55%',
             Loai_cau: 'FREQUENCY_FALLBACK',
-            Table_signature: ai.signature,
-            Formula_match: 0,
-            Status: 'NO_PATTERN_FOUND',
-            Bias_check: 'NO_FORMULAS'
+            BANKER: Math.round(stats.B) + '%',
+            PLAYER: Math.round(stats.P) + '%',
+            So_formula: 0,
+            Status: 'NO_PATTERN',
+            Bias_check: `B:${Math.round(stats.B)}% P:${Math.round(stats.P)}%`
         };
     }
 
-    // Weighted scoring
-    let scoreB = 0, scoreP = 0, countB = 0, countP = 0;
-    const typeWeights = {
-        streak: 1.2, alternation: 1.25, pattern: 1.15, chop: 1.1,
-        balance: 1.12, momentum: 1.18, reversal: 1.15, breakout: 1.12,
-        cycle: 1.1, fibonacci: 1.15, ai_learned: 1.2, ai_antibias: 1.25
-    };
+    // Tính điểm có trọng số
+    let scoreB = 0, scoreP = 0;
+    let countB = 0, countP = 0;
     
     for (const r of results) {
-        if (r.predict === 'B' || r.predict === 'P') {
-            const weight = typeWeights[r.type] || 1.0;
-            const weighted = r.conf * weight * (r.flipped ? 0.95 : 1.0);
-            
-            if (r.predict === 'B') { scoreB += weighted; countB++; }
-            else { scoreP += weighted; countP++; }
-        }
+        const weight = r.weight || 1.0;
+        const adjustedConf = r.conf * weight * (r.flipped ? 0.9 : 1.0);
+        
+        if (r.predict === 'B') { scoreB += adjustedConf; countB++; }
+        else if (r.predict === 'P') { scoreP += adjustedConf; countP++; }
     }
 
-    const avgB = countB > 0 ? scoreB / countB : 25;
-    const avgP = countP > 0 ? scoreP / countP : 25;
+    const avgB = countB > 0 ? scoreB / countB : 30;
+    const avgP = countP > 0 ? scoreP / countP : 30;
     
     const total = avgB + avgP;
     const ratioB = avgB / total * 100;
     const ratioP = avgP / total * 100;
 
+    // Dự đoán (không thiên vị)
     const prediction = ratioB > ratioP ? 'BANKER' : 'PLAYER';
     const confidence = Math.max(ratioB, ratioP);
 
-    // Log prediction for next run
-    tableHistory[tableId].push({
-        timestamp: Date.now(),
-        prediction,
-        patterns: results.length,
-        confidence
-    });
-
+    // Top formulas
     results.sort((a,b) => b.conf - a.conf);
-    const topFormulas = results.slice(0, 5).map((r, i) => `${i+1}.${r.name}(${r.conf}%)`).join(' | ');
+    const topFormulas = results.slice(0, 5).map((r, i) => 
+        `${i+1}.${r.name}(${r.conf}%)${r.flipped ? '↻' : ''}`
+    ).join(' | ');
 
-    const bFlipped = results.filter(r => r.flipped && r.predict === 'B').length;
-    const pFlipped = results.filter(r => r.flipped && r.predict === 'P').length;
+    // Kiểm tra đa dạng
+    const bFormulas = results.filter(r => r.predict === 'B').length;
+    const pFormulas = results.filter(r => r.predict === 'P').length;
+    const flipped = results.filter(r => r.flipped).length;
 
     return {
         Du_doan: prediction,
         Ti_le: Math.round(confidence) + '%',
-        Do_tin_cay: Math.round(60 + results.length * 2) + '%',
+        Do_tin_cay: Math.min(Math.round(60 + results.length * 2 + confidence * 0.2), 95) + '%',
         Loai_cau: results[0]?.name || 'MIXED',
-        BANKER: Math.round(ratioB) + '% (' + Math.round(70 + ratioB * 0.3) + '%)',
-        PLAYER: Math.round(ratioP) + '% (' + Math.round(70 + ratioP * 0.3) + '%)',
-        So_formula_match: results.length,
+        BANKER: Math.round(ratioB) + '% (' + Math.round(65 + ratioB * 0.3) + '%)',
+        PLAYER: Math.round(ratioP) + '% (' + Math.round(65 + ratioP * 0.3) + '%)',
+        So_formula: results.length,
         Top_formulas: topFormulas,
+        Status: 'NEUTRAL_ANALYSIS',
+        Bias_check: `B:${countB}/${bFormulas} | P:${countP}/${pFormulas} | Flipped:${flipped}`,
         Table_signature: ai.signature,
-        Bias_check: `B_Formulas:${countB} | P_Formulas:${countP} | Flipped:${bFlipped + pFlipped}`,
-        Adaptive_applied: (bFlipped + pFlipped) > 0,
-        Status: 'ADAPTIVE_PREMIUM'
+        Diversified: flipped > 0,
+        engine: 'NEUTRAL-VIP-2026'
     };
 }
 
@@ -549,27 +717,26 @@ app.get('/api/predict/:tableId', async (req, res) => {
         if (!sessionData[tableId]) sessionData[tableId] = 0;
         if (isNew) sessionData[tableId]++;
 
-        const result = duDoanPremium(cauGoc, tableId);
+        const result = duDoanNeutral(cauGoc, tableId);
 
         res.json({
             success: true,
             table: tableId,
             phien: sessionData[tableId],
-            cau_goc: cauGoc.substring(Math.max(0, cauGoc.length - 40)),
+            cau_goc: cauGoc.slice(-40),
             Du_doan: result.Du_doan,
             Ti_le: result.Ti_le,
             Do_tin_cay: result.Do_tin_cay,
             Loai_cau: result.Loai_cau,
             BANKER: result.BANKER,
             PLAYER: result.PLAYER,
-            So_formula: result.So_formula_match,
+            So_formula: result.So_formula,
             Top_formulas: result.Top_formulas,
-            Table_signature: result.Table_signature,
-            Bias_analysis: result.Bias_check,
-            Adaptive_applied: result.Adaptive_applied,
             Status: result.Status,
-            engine: 'VIP-PREMIUM-ADAPTIVE-AI',
-            mode: 'ANTI-BIAS-DIVERSIFIED',
+            Bias_check: result.Bias_check,
+            Diversified: result.Diversified,
+            engine: 'NEUTRAL-VIP-2026',
+            mode: 'NO_BIAS',
             author: '@AR-AI',
             timestamp: new Date().toISOString()
         });
@@ -582,7 +749,6 @@ app.get('/api/predict/all', async (req, res) => {
     try {
         const tableIds = ['C01', 'C02', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10', 'C11', 'C15', 'C16', 'C17', 'C18', 'C19', 'C20'];
         const predictions = {};
-        const predictions_array = [];
 
         for (const id of tableIds) {
             const cauGoc = await fetchTableData(id);
@@ -594,29 +760,31 @@ app.get('/api/predict/all', async (req, res) => {
             if (!sessionData[id]) sessionData[id] = 0;
             if (isNew) sessionData[id]++;
 
-            const result = duDoanPremium(cauGoc, id);
+            const result = duDoanNeutral(cauGoc, id);
             predictions[id] = {
                 phien: sessionData[id],
                 Du_doan: result.Du_doan,
                 Ti_le: result.Ti_le,
                 Do_tin_cay: result.Do_tin_cay
             };
-            predictions_array.push({table: id, prediction: result.Du_doan});
         }
 
-        // Check diversity
-        const bCount = predictions_array.filter(p => p.prediction === 'BANKER').length;
-        const pCount = predictions_array.filter(p => p.prediction === 'PLAYER').length;
-        const diversity = bCount > 0 && pCount > 0 ? 'DIVERSIFIED' : 'BIASED';
+        // Kiểm tra phân phối
+        const bCount = Object.values(predictions).filter(p => p.Du_doan === 'BANKER').length;
+        const pCount = Object.values(predictions).filter(p => p.Du_doan === 'PLAYER').length;
+        const totalTables = Object.keys(predictions).length;
 
         res.json({
             success: true,
-            engine: 'VIP-PREMIUM-ADAPTIVE-AI',
-            mode: 'ANTI-BIAS-DIVERSIFIED',
-            version: 'ULTRA_V2026',
-            diversity_check: diversity,
-            banker_count: bCount,
-            player_count: pCount,
+            engine: 'NEUTRAL-VIP-2026',
+            mode: 'NO_BIAS',
+            version: 'NEUTRAL_v1.0',
+            distribution: {
+                BANKER: bCount,
+                PLAYER: pCount,
+                total: totalTables,
+                balance: totalTables > 0 ? Math.round(Math.abs(bCount - pCount) / totalTables * 100) + '%' : 'N/A'
+            },
             author: '@AR-AI',
             timestamp: new Date().toISOString(),
             predictions: predictions
@@ -628,53 +796,57 @@ app.get('/api/predict/all', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.json({
-        name: 'VIP PREMIUM ADAPTIVE AI 2026',
-        version: 'ULTRA_V2026',
+        name: 'NEUTRAL BACCARAT AI - NO BIAS',
+        version: 'NEUTRAL_v1.0',
         author: '@AR-AI',
-        mode: 'ANTI-BIAS-DIVERSIFIED',
+        mode: 'NO_BIAS | DIVERSIFIED',
         features: [
-            'Per-Table Independent AI Analysis',
-            'Adaptive Weight System',
-            'Table Signature Recognition',
-            'Anti-Bias Voting System',
-            'Formula Diversity Enforcement',
-            'AI Learning Per Table',
-            'Reversal-Based Predictions',
-            'Automatic Bias Detection & Correction',
-            'Multi-Layer Validation'
+            '17 Neutral Formulas (No Bias)',
+            'Automatic Diversification',
+            'Anti-Bias Enforcement',
+            'Per-Table Independent Analysis',
+            'AI Pattern Learning (Neutral)',
+            'Balanced Predictions',
+            'No Favorite Side'
         ],
-        algorithms: [
-            'Adaptive Streak Detection',
-            'Zigzag Pattern with Bias Reversal',
-            '2-2-2 Pattern with Anti-Bias',
-            '3-3-3 Pattern Analysis',
-            'Chop Detection with Reversal',
-            'Balance Correction System',
-            'Momentum-Based Reversal',
-            'Trend Reversal Analysis',
-            'Breakout Pattern Detection',
-            'Cycle Pattern Recognition',
-            'Fibonacci Sequence',
-            'Per-Table AI Learning'
+        formulas: [
+            '1. Streak Detection (Neutral)',
+            '2. Zigzag Pattern (Neutral)',
+            '3. 2-2-2 Pattern (Neutral)',
+            '4. 3-3-3 Pattern (Neutral)',
+            '5. Chop Detection (Neutral)',
+            '6. Balance Correction (Neutral)',
+            '7. 10-Ván Trend (Neutral)',
+            '8. 20-Ván Trend (Neutral)',
+            '9. 1-2-1 Pattern (Neutral)',
+            '10. 2-1-2 Pattern (Neutral)',
+            '11. 3-2-1 Pattern (Neutral)',
+            '12. 1-2-3 Pattern (Neutral)',
+            '13. Ratio Analysis (Neutral)',
+            '14. Wave Detection (Neutral)',
+            '15. 1-2-1-2 Pattern (Neutral)',
+            '16. 2-1-2-1 Pattern (Neutral)',
+            '17. Score Analysis (Neutral)'
         ],
         guarantees: [
-            'No Bias Per Table',
-            'Different Predictions Across Tables',
-            'Adaptive to Table Behavior',
-            'Anti-Bias Enforcement',
-            'Diversity Check On All Tables'
+            'No Fixed Bias',
+            'Automatic Diversification',
+            'Balanced Predictions',
+            'Adaptive to Each Table',
+            'No Random Results'
         ]
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('╔════════════════════════════════════════╗');
-    console.log('║  VIP PREMIUM ADAPTIVE AI 2026        ║');
-    console.log('║  ANTI-BIAS | DIVERSIFIED             ║');
-    console.log('╚════════════════════════════════════════╝');
+    console.log('╔══════════════════════════════════════════╗');
+    console.log('║  NEUTRAL BACCARAT AI - NO BIAS         ║');
+    console.log('║  v1.0 - Diversified Predictions        ║');
+    console.log('╚══════════════════════════════════════════╝');
     console.log('🚀 http://localhost:' + PORT);
     console.log('👤 @AR-AI');
-    console.log('🎯 Mode: Per-Table Adaptive Analysis');
-    console.log('📊 Bias Check: ENABLED');
-    console.log('════════════════════════════════════════');
+    console.log('🎯 Mode: NO_BIAS');
+    console.log('📊 Diversification: ENABLED');
+    console.log('⚖️  Balanced Predictions Guaranteed');
+    console.log('══════════════════════════════════════════');
 });
